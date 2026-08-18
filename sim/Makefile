@@ -33,11 +33,16 @@ SRC_tb_argon2_index     := $(RTL)/argon2/argon2_index.sv
 SRC_tb_argon2_compress  := $(ARGON2_G)
 SRC_tb_argon2_addr_gen  := $(RTL)/argon2/argon2_addr_gen.sv $(ARGON2_G)
 SRC_tb_argon2_fill      := $(FILL_RTL)
+SRC_tb_argon2_fill_rfc  := $(FILL_RTL) $(RTL)/argon2/argon2_fill_job.sv
+SRC_tb_argon2_axi       := $(FILL_RTL) \
+	$(RTL)/argon2/argon2_axi_mm.sv \
+	$(RTL)/argon2/argon2_fill_axi.sv \
+	tb_axi_ram.sv
 
-.PHONY: all blake2b blamka index compress addr fill vectors clean
+.PHONY: all blake2b blamka index compress addr fill rfc axi vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
-all: blake2b blamka index compress addr fill
+all: blake2b blamka index compress addr fill rfc axi
 
 vectors: $(GEN)/fill_i_init.hex
 
@@ -51,6 +56,8 @@ index:   run-tb_argon2_index
 compress: run-tb_argon2_compress
 addr:    run-tb_argon2_addr_gen
 fill:    vectors run-tb_argon2_fill
+rfc:     vectors run-tb_argon2_fill_rfc
+axi:     vectors run-tb_argon2_axi
 
 ifeq ($(SIM),verilator)
 

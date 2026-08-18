@@ -28,6 +28,7 @@ module tb_argon2_fill;
         .passes(passes), .lanes(lanes), .lane_id(lane_id),
         .lane_length(lane_length), .memory_blocks(memory_blocks),
         .type_i(type_i),
+        .sync_req(), .sync_ack(1'b1),
         .mem_rd_valid(mem_rd_valid), .mem_rd_ready(mem_rd_ready),
         .mem_rd_addr(mem_rd_addr),
         .mem_rd_data_v(mem_rd_data_v), .mem_rd_data(mem_rd_data),

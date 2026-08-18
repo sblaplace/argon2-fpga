@@ -35,6 +35,28 @@ def write_mem_hex(path: pathlib.Path, memory: list[list[int]]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+# RFC 9106 §5 — the 32 KiB / p=4 / t=3 published vector.
+RFC_PASSWORD = bytes([0x01] * 32)
+RFC_SALT = bytes([0x02] * 16)
+RFC_KW = dict(
+    time_cost=3,
+    memory_cost=32,
+    parallelism=4,
+    hash_len=32,
+    secret=bytes([0x03] * 8),
+    associated_data=bytes([0x04] * 12),
+)
+
+
+def dump_rfc(type_: Type, stem: str) -> None:
+    kw = dict(RFC_KW, type_=type_)
+    init = argon2_init_memory(RFC_PASSWORD, RFC_SALT, **kw)
+    tag, final = argon2_fill(RFC_PASSWORD, RFC_SALT, **kw)
+    write_mem_hex(GEN / f"{stem}_init.hex", init)
+    write_mem_hex(GEN / f"{stem}_exp.hex", final)
+    print(f"{stem} tag {tag.hex()}")
+
+
 def dump_fill(type_: Type, stem: str) -> None:
     kw = dict(
         time_cost=2,
@@ -77,6 +99,9 @@ def main() -> None:
     dump_fill(Type.I, "fill_i")
     dump_fill(Type.D, "fill_d")
     dump_fill(Type.ID, "fill_id")
+    dump_rfc(Type.I, "rfc_i")
+    dump_rfc(Type.D, "rfc_d")
+    dump_rfc(Type.ID, "rfc_id")
     print(f"wrote hex under {GEN}", file=sys.stderr)
 
 

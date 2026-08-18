@@ -90,6 +90,18 @@ class Rfc9106Tags(unittest.TestCase):
         self.assertEqual(argon2(PASSWORD, SALT, type_=Type.ID, **PARAMS), TAG_ID)
 
 
+class Rfc9106Workspace(unittest.TestCase):
+    """The published vector is 32 × 1 KiB blocks — the RTL RFC KAT size."""
+
+    def test_memory_is_32_blocks(self) -> None:
+        from ref.argon2 import argon2_fill
+
+        tag, mem = argon2_fill(PASSWORD, SALT, type_=Type.I, **PARAMS)
+        self.assertEqual(tag, TAG_I)
+        self.assertEqual(len(mem), 32)
+        self.assertEqual(len(mem[0]), 128)
+
+
 class BlaMkaSanity(unittest.TestCase):
     def test_fbla_differs_from_add(self) -> None:
         # If we forgot the multiply, G would collapse to a BLAKE2b round.

@@ -98,8 +98,9 @@ the random-ref term.
 
 AWS F1 (`f1.2xlarge`, VU9P) exposes **4 independent DDR4 channels**
 through the HDK (`cl_dram_dma` / AXI-MM, typically 512-bit). The v1
-integration is four copies of `argon2_fill_ctrl`, one per `sh_ddr`
-port, no cross-channel traffic.
+integration is four copies of `argon2_fill_axi`, one per `sh_ddr`
+port. Cross-channel traffic is only the 1-bit slice barrier when a
+single job uses p > 1.
 
 Alveo U50 is the same picture with 32 HBM pseudo-channels.
 
@@ -121,11 +122,13 @@ G so address generation of the next window can later overlap a fill.
 | `blamka_g` (4-stage) | Written |
 | `argon2_p`, `argon2_compress` | Written |
 | `argon2_index`, `argon2_ref_area` | Written |
-| `argon2_fill_ctrl` | One-lane job: argon2i/d/id, dest-xor fetch, ref prefetch |
+| `argon2_fill_ctrl` | One-lane job: argon2i/d/id, dest-xor fetch, ref prefetch, slice-sync ports |
+| `argon2_fill_job` | p lanes + AND barrier at each slice |
 | `argon2_addr_gen` (argon2i PRNG) | Two G's in counter mode, 128 J1∥J2 / window |
-| AXI-MM / F1 shell | Not yet |
+| `argon2_axi_mm` / `argon2_fill_axi` | 512-bit AXI4-MM, 16-beat / 1 KiB block, independent R/W |
+| F1 `cl_dram_dma` / `sh_ddr` shell | Not yet |
 | Python golden model + RFC 9106 §5 | Passing |
-| Benches + CI (Icarus **and** Verilator) | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill — all passing |
+| Benches + CI (Icarus **and** Verilator) | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill, RFC 32 KiB / p=4, AXI-MM — all passing |
 
 ## Verification plan
 
@@ -133,9 +136,11 @@ G so address generation of the next window can later overlap a fill.
    The golden model *is* the spec the RTL is written to.
 2. **Now, in simulation:** `make sim` (Icarus) or `make -C sim SIM=verilator`
    runs the self-checking benches under `sim/` (vectors dumped from `ref/`
-   via `python3 -m tests.dump_vectors`). The fill KAT is p=1 / m=8 KiB /
-   t=2 for all three types and compares the entire working set against the
-   golden model after the last pass.
+   via `python3 -m tests.dump_vectors`). The small fill KAT is p=1 / m=8 KiB /
+   t=2. The RFC KAT is p=4 / m=32 KiB / t=3 (the published §5 vector) and
+   needs the slice barrier. `tb_argon2_axi` replays the 8 KiB job through
+   the AXI adapter. All three compare the entire working set against `ref/`
+   after the last pass.
 
    Bringing a simulator up against this RTL for the first time found four
    real bugs, all now fixed: a `ROTR64` macro that part-selected a
