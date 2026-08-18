@@ -18,6 +18,8 @@ make -C sim index      # index_alpha
 make -C sim compress   # compression G (incl. dest-xor)
 make -C sim addr       # argon2i address window
 make -C sim fill       # 8 KiB p=1 fill KAT (i / d / id)
+make -C sim rfc        # RFC 9106 §5 32 KiB / p=4 fill (i / d / id)
+make -C sim axi        # 8 KiB fill through the AXI4-MM adapter
 ```
 
 `make -C sim fill` first dumps hex from `ref/` into `sim/gen/`. Dump by
@@ -30,7 +32,7 @@ python3 -m tests.dump_vectors
 The fill bench uses a 12-cycle read latency so the argon2i prefetch
 (random ref issued at the start of G) is actually in flight.
 
-Current status — all six pass on both back ends:
+Current status — all eight pass on both back ends:
 
 | Bench | Checks |
 |-------|--------|
@@ -40,6 +42,8 @@ Current status — all six pass on both back ends:
 | `tb_argon2_compress` | G(IV×16, 0) and the pass>0 dest-XOR path |
 | `tb_argon2_addr_gen` | 128-address argon2i window in counter mode |
 | `tb_argon2_fill` | t=2 / m=8 KiB / p=1 fill, argon2i + d + id |
+| `tb_argon2_fill_rfc` | RFC 9106 §5: t=3 / m=32 KiB / p=4, slice barrier |
+| `tb_argon2_axi` | 8 KiB fill through `argon2_fill_axi` + AXI slave |
 
 `tb_argon2_fill` compares the whole 8 KiB working set against `ref/`
 after the last pass, so it covers addressing, the prefetch path, the

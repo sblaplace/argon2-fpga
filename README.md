@@ -69,15 +69,17 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       and a single-lane fill-controller skeleton (`rtl/`).
 - [x] Wire argon2i address generation (`G` in counter mode) into the fill FSM
       and prefetch the random read. Dest-xor (v1.3, pass > 0) is fetched too.
-- [x] Self-checking benches in `sim/` (G, index, addr-gen, 8 KiB fill KAT),
-      running on **both Icarus and Verilator** (`make -C sim`,
-      `make -C sim SIM=verilator`). All six pass: the 8 KiB t=2 p=1 fill
-      matches `ref/` bit-for-bit for argon2i / d / id. Workflow YAML is in
-      [`docs/github-ci.yml`](docs/github-ci.yml) (copy to
+- [x] Self-checking benches in `sim/` (G, index, addr-gen, 8 KiB fill KAT,
+      RFC 32 KiB / p=4 fill, AXI-MM adapter), running on **both Icarus and
+      Verilator** (`make -C sim`, `make -C sim SIM=verilator`). Workflow YAML
+      is in [`docs/github-ci.yml`](docs/github-ci.yml) (copy to
       `.github/workflows/ci.yml` to enable Actions).
-- [ ] AWS F1 hello-world: `cl_dram_dma` multi-channel bandwidth, then one
-      known-answer fill (the 32 KiB RFC vector) on a single DDR4 port.
-- [ ] Slice barrier so one job can use p > 1 across cores; v1 is p = 1.
+- [x] Slice barrier so one job can use p > 1 across cores
+      (`argon2_fill_job`); locked to the RFC 9106 §5 32 KiB vector.
+- [x] AXI4-MM adapter (`argon2_axi_mm` / `argon2_fill_axi`): 512-bit,
+      16-beat bursts, independent R/W so a prefetch can overlap a write.
+- [ ] AWS F1 hello-world: `cl_dram_dma` multi-channel bandwidth, then the
+      32 KiB RFC vector on a single DDR4 port (the sim KAT already exists).
 - [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling.
 
 ## Tree
@@ -85,8 +87,8 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
 ```
 ref/                  RFC-faithful Python (the spec the RTL is written to)
 rtl/blake2b/          BLAKE2b G / round / F / incremental hasher  (H, H')
-rtl/argon2/           BlaMka, P, G, index, addr-gen, fill ctrl     (the job)
-sim/                  Icarus benches, vectors from ref/
+rtl/argon2/           BlaMka, P, G, index, addr-gen, fill, AXI-MM  (the job)
+sim/                  Icarus / Verilator benches, vectors from ref/
 docs/                 survey + architecture
 tests/                unittest against RFC 9106 §5
 ```

@@ -17,8 +17,9 @@
 // Memory port is block-addressed: the interconnect (AWS F1 CL_DRAM_DMA,
 // AXI-MM, HBM) bursts 1024-byte blocks. One outstanding read.
 //
-// v1 walks one lane for the whole job (p = 1). Multi-lane jobs need a
-// slice barrier between lanes; that is a later wrapper.
+// One instance walks one lane. Multi-lane jobs instantiate several of
+// these and join `sync_req`/`sync_ack` at each slice boundary (see
+// argon2_fill_job). p = 1 never waits.
 
 `timescale 1ns / 1ps
 
@@ -38,6 +39,11 @@ module argon2_fill_ctrl #(
     input  logic [31:0]       lane_length,     // q
     input  logic [31:0]       memory_blocks,   // m'
     input  logic [1:0]        type_i,          // 0=d 1=i 2=id
+
+    // Slice barrier. Held until every sibling lane finishes the same
+    // slice; ignored when lanes == 1 (ack may be tied high or left open).
+    output logic              sync_req,
+    input  logic              sync_ack,
 
     // Block memory (1024 B = 16 × 512 b)
     output logic              mem_rd_valid,
@@ -68,7 +74,8 @@ module argon2_fill_ctrl #(
         COLLECT_DEST,
         COMPRESS,
         WRITE,
-        ADVANCE
+        ADVANCE,
+        SLICE_SYNC
     } state_t;
     state_t state;
 
@@ -238,6 +245,7 @@ module argon2_fill_ctrl #(
             pref_beat    <= 5'd0;
             pref_issued  <= 1'b0;
             pref_ready   <= 1'b0;
+            sync_req     <= 1'b0;
             mem_rd_addr  <= '0;
             mem_wr_addr  <= '0;
         end else begin
@@ -264,7 +272,8 @@ module argon2_fill_ctrl #(
 
             case (state)
                 IDLE: begin
-                    busy <= 1'b0;
+                    busy     <= 1'b0;
+                    sync_req <= 1'b0;
                     if (start) begin
                         busy        <= 1'b1;
                         pass_r      <= 32'd0;
@@ -450,14 +459,19 @@ module argon2_fill_ctrl #(
                               || index_r + 32'd1 == segment_length) begin
                         pref_issued <= 1'b0;
                         pref_ready  <= 1'b0;
-                        if (slice_r + 32'd1 == 32'd4) begin
-                            slice_r <= 32'd0;
-                            pass_r  <= pass_r + 32'd1;
+                        if (lanes > 32'd1) begin
+                            sync_req <= 1'b1;
+                            state    <= SLICE_SYNC;
                         end else begin
-                            slice_r <= slice_r + 32'd1;
+                            if (slice_r + 32'd1 == 32'd4) begin
+                                slice_r <= 32'd0;
+                                pass_r  <= pass_r + 32'd1;
+                            end else begin
+                                slice_r <= slice_r + 32'd1;
+                            end
+                            index_r <= 32'd0;
+                            state   <= SEG_PREP;
                         end
-                        index_r <= 32'd0;
-                        state   <= SEG_PREP;
                     end else begin
                         index_r <= index_r + 32'd1;
                         if (independent && ((index_r + 32'd1) & 32'd127) == 32'd0) begin
@@ -469,6 +483,21 @@ module argon2_fill_ctrl #(
                         end else begin
                             state <= DISPATCH;
                         end
+                    end
+                end
+
+                SLICE_SYNC: begin
+                    sync_req <= 1'b1;
+                    if (sync_ack) begin
+                        sync_req <= 1'b0;
+                        if (slice_r + 32'd1 == 32'd4) begin
+                            slice_r <= 32'd0;
+                            pass_r  <= pass_r + 32'd1;
+                        end else begin
+                            slice_r <= slice_r + 32'd1;
+                        end
+                        index_r <= 32'd0;
+                        state   <= SEG_PREP;
                     end
                 end
 
