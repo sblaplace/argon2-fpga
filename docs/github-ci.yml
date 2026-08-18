@@ -16,7 +16,7 @@ jobs:
       - name: RFC 7693 / RFC 9106 golden model
         run: make test
 
-  sim:
+  sim-iverilog:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +27,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y iverilog
       - name: Self-checking benches
         run: make sim
+
+  sim-verilator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Verilator
+        run: sudo apt-get update && sudo apt-get install -y verilator
+      - name: Self-checking benches
+        run: make -C sim SIM=verilator

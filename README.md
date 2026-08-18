@@ -69,9 +69,12 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       and a single-lane fill-controller skeleton (`rtl/`).
 - [x] Wire argon2i address generation (`G` in counter mode) into the fill FSM
       and prefetch the random read. Dest-xor (v1.3, pass > 0) is fetched too.
-- [x] Icarus self-checking benches in `sim/` (G, index, addr-gen, 8 KiB fill
-      KAT). Workflow YAML is in [`docs/github-ci.yml`](docs/github-ci.yml)
-      (copy to `.github/workflows/ci.yml` to enable Actions).
+- [x] Self-checking benches in `sim/` (G, index, addr-gen, 8 KiB fill KAT),
+      running on **both Icarus and Verilator** (`make -C sim`,
+      `make -C sim SIM=verilator`). All six pass: the 8 KiB t=2 p=1 fill
+      matches `ref/` bit-for-bit for argon2i / d / id. Workflow YAML is in
+      [`docs/github-ci.yml`](docs/github-ci.yml) (copy to
+      `.github/workflows/ci.yml` to enable Actions).
 - [ ] AWS F1 hello-world: `cl_dram_dma` multi-channel bandwidth, then one
       known-answer fill (the 32 KiB RFC vector) on a single DDR4 port.
 - [ ] Slice barrier so one job can use p > 1 across cores; v1 is p = 1.

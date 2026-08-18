@@ -125,15 +125,27 @@ G so address generation of the next window can later overlap a fill.
 | `argon2_addr_gen` (argon2i PRNG) | Two G's in counter mode, 128 J1∥J2 / window |
 | AXI-MM / F1 shell | Not yet |
 | Python golden model + RFC 9106 §5 | Passing |
-| Icarus benches + CI | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill |
+| Benches + CI (Icarus **and** Verilator) | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill — all passing |
 
 ## Verification plan
 
 1. **Now:** `python3 -m unittest` against RFC 7693 and RFC 9106 §5.
    The golden model *is* the spec the RTL is written to.
-2. **Now, with Icarus:** `make sim` runs the self-checking benches under
-   `sim/` (vectors dumped from `ref/` via `python3 -m tests.dump_vectors`).
-   The fill KAT is p=1 / m=8 KiB / t=2 for all three types.
+2. **Now, in simulation:** `make sim` (Icarus) or `make -C sim SIM=verilator`
+   runs the self-checking benches under `sim/` (vectors dumped from `ref/`
+   via `python3 -m tests.dump_vectors`). The fill KAT is p=1 / m=8 KiB /
+   t=2 for all three types and compares the entire working set against the
+   golden model after the last pass.
+
+   Bringing a simulator up against this RTL for the first time found four
+   real bugs, all now fixed: a `ROTR64` macro that part-selected a
+   parenthesized expression (illegal — the RTL had never compiled), a call
+   to a nonexistent `pref_collect()` task, 1024-bit `argon2_p` ports driven
+   with single-bit selects in `argon2_compress`, and — the substantive one —
+   a `COMPRESS`/`WRITE` handshake in `argon2_fill_ctrl` that registered the
+   payload off a `beat` counter which only advanced *after* the handshake,
+   so word 0 was sent twice and word 15 never. The streaming ports are now
+   driven combinationally from `state` / `beat`.
 3. **On F1:** one-channel known-answer (the 32 KiB RFC vector fits in
    BRAM — use it as a unit test before touching DDR) then a DDR
    bandwidth microbench (`cl_dram_dma` hello-world).

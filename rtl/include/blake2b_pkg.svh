@@ -11,6 +11,9 @@
 `define BLAKE2B_IV6 64'h1f83d9abfb41bd6b
 `define BLAKE2B_IV7 64'h5be0cd19137e2179
 
-`define ROTR64(x, n) { (x)[(n)-1:0], (x)[63:(n)] }
+// Rotate right, 64-bit. Written with shifts (not a part-select) because a
+// bit-select may only be applied to an identifier, not to an arbitrary
+// expression — `ROTR64(a ^ b, 32)` is a syntax error with the concat form.
+`define ROTR64(x, n) (64'((64'(x) >> (n)) | (64'(x) << (64 - (n)))))
 
 `endif

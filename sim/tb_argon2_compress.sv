@@ -38,18 +38,24 @@ module tb_argon2_compress;
         end
     endtask
 
+    // Drive on the negedge and check in_ready *before* presenting a beat:
+    // in_ready is registered, so if it is high at the negedge the beat is
+    // taken on the following posedge. Waiting for in_ready *after* the last
+    // beat would block until the whole G has already drained.
     task automatic feed_g(input integer xor_dest);
         integer b;
         with_xor = xor_dest;
         in_dest  = {16{32'hFFFF_FFFF}}; // 512 ones if xor_dest, ignored otherwise
         for (b = 0; b < 16; b = b + 1) begin
+            @(negedge clk);
+            while (!in_ready) @(negedge clk);
             in_x     = IV_BEAT;
             in_y     = 512'd0;
             in_last  = (b == 15);
             in_valid = 1'b1;
             @(posedge clk);
-            while (!in_ready) @(posedge clk);
         end
+        @(negedge clk);
         in_valid = 1'b0;
         in_last  = 1'b0;
     endtask
@@ -74,7 +80,7 @@ module tb_argon2_compress;
         beats = 0;
         cycles = 0;
         while (beats < 16 && cycles < 4000) begin
-            @(posedge clk);
+            @(negedge clk);
             cycles = cycles + 1;
             if (out_valid && out_ready) begin
                 if (beats == 0) begin
@@ -109,7 +115,7 @@ module tb_argon2_compress;
         beats = 0;
         cycles = 0;
         while (beats < 16 && cycles < 4000) begin
-            @(posedge clk);
+            @(negedge clk);
             cycles = cycles + 1;
             if (out_valid && out_ready) begin
                 if (beats == 0)

@@ -86,11 +86,26 @@ module argon2_fill_ctrl #(
     logic [4:0]   pref_beat;
     logic         pref_issued, pref_ready;
 
-    // Compress streaming
+    // Compress streaming. in_* and out_* are driven combinationally from the
+    // FSM state and `beat`: the beat counter only advances on a handshake, so
+    // registering the payload off `beat` would present each word one cycle
+    // late (word 0 twice, word 15 never).
     logic         c_in_valid, c_in_ready, c_in_last;
     logic [511:0] c_in_x, c_in_y, c_in_dest;
     logic         c_out_valid, c_out_ready, c_out_last;
     logic [511:0] c_out_data;
+
+    assign c_in_valid = (state == COMPRESS);
+    assign c_in_x     = prev_q[beat[3:0]];
+    assign c_in_y     = ref_q [beat[3:0]];
+    assign c_in_dest  = with_xor ? dest_q[beat[3:0]] : 512'd0;
+    assign c_in_last  = (beat == 5'd15);
+
+    // Write port is a straight pass-through of the compress output stream.
+    assign c_out_ready  = (state == WRITE) && mem_wr_ready;
+    assign mem_wr_valid = (state == WRITE) && c_out_valid;
+    assign mem_wr_data  = c_out_data;
+    assign mem_wr_last  = c_out_last;
 
     argon2_compress u_g (
         .clk      (clk),
@@ -176,35 +191,37 @@ module argon2_fill_ctrl #(
         .rd_j_b        (addr_word_n)
     );
 
-    always_comb begin
-        segment_length = lane_length / SYNC;
-        independent = (type_i == 2'd1) ||
-                      (type_i == 2'd2 && pass_r == 32'd0 && slice_r < 32'd2);
-        with_xor = (pass_r != 32'd0);
-        curr_idx = lane_id * lane_length + slice_r * segment_length + index_r;
-        prev_idx = (curr_idx % lane_length == 32'd0)
-                 ? (curr_idx + lane_length - 32'd1)
-                 : (curr_idx - 32'd1);
-        prev_word0 = prev_q[0][63:0];
-        pseudo_rand = independent ? addr_word : prev_word0;
-        j1 = pseudo_rand[31:0];
-        ref_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
-                 ? lane_id
-                 : pseudo_rand[63:32] % lanes;
-        same_lane = (ref_lane == lane_id);
-        ref_idx = ref_lane * lane_length + z;
+    // Continuous assigns (not one big always_comb): ref_area / start_pos feed
+    // argon2_index, whose output feeds ref_idx. Lumping them into a single
+    // procedural block makes the whole set look like one circular node to a
+    // cycle-accurate simulator (Verilator UNOPTFLAT).
+    assign segment_length = lane_length / SYNC;
+    assign independent    = (type_i == 2'd1) ||
+                            (type_i == 2'd2 && pass_r == 32'd0 && slice_r < 32'd2);
+    assign with_xor       = (pass_r != 32'd0);
+    assign curr_idx       = lane_id * lane_length + slice_r * segment_length + index_r;
+    assign prev_idx       = (curr_idx % lane_length == 32'd0)
+                          ? (curr_idx + lane_length - 32'd1)
+                          : (curr_idx - 32'd1);
+    assign prev_word0     = prev_q[0][63:0];
+    assign pseudo_rand    = independent ? addr_word : prev_word0;
+    assign j1             = pseudo_rand[31:0];
+    assign ref_lane       = ((pass_r == 32'd0) && (slice_r == 32'd0))
+                          ? lane_id
+                          : pseudo_rand[63:32] % lanes;
+    assign same_lane      = (ref_lane == lane_id);
+    assign ref_idx        = ref_lane * lane_length + z;
 
-        index_n = index_r + 32'd1;
-        j1_n = addr_word_n[31:0];
-        ref_lane_n = ((pass_r == 32'd0) && (slice_r == 32'd0))
-                   ? lane_id
-                   : addr_word_n[63:32] % lanes;
-        same_lane_n = (ref_lane_n == lane_id);
-        ref_idx_n = ref_lane_n * lane_length + z_n;
-        can_prefetch = independent
-                    && (index_n < segment_length)
-                    && (index_n[6:0] != 7'd0);
-    end
+    assign index_n        = index_r + 32'd1;
+    assign j1_n           = addr_word_n[31:0];
+    assign ref_lane_n     = ((pass_r == 32'd0) && (slice_r == 32'd0))
+                          ? lane_id
+                          : addr_word_n[63:32] % lanes;
+    assign same_lane_n    = (ref_lane_n == lane_id);
+    assign ref_idx_n      = ref_lane_n * lane_length + z_n;
+    assign can_prefetch   = independent
+                          && (index_n < segment_length)
+                          && (index_n[6:0] != 7'd0);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -212,9 +229,6 @@ module argon2_fill_ctrl #(
             busy         <= 1'b0;
             done         <= 1'b0;
             mem_rd_valid <= 1'b0;
-            mem_wr_valid <= 1'b0;
-            c_in_valid   <= 1'b0;
-            c_out_ready  <= 1'b0;
             a_init       <= 1'b0;
             a_start      <= 1'b0;
             pass_r       <= 32'd0;
@@ -226,13 +240,10 @@ module argon2_fill_ctrl #(
             pref_ready   <= 1'b0;
             mem_rd_addr  <= '0;
             mem_wr_addr  <= '0;
-            mem_wr_data  <= '0;
-            mem_wr_last  <= 1'b0;
         end else begin
             done        <= 1'b0;
             a_init      <= 1'b0;
             a_start     <= 1'b0;
-            c_out_ready <= 1'b0;
 
             // Prefetch collector: the random read launched at the start of G
             // returns during COMPRESS / WRITE / ADVANCE.
@@ -414,14 +425,8 @@ module argon2_fill_ctrl #(
                         pref_issued  <= 1'b1;
                         pref_beat    <= 5'd0;
                     end
-                    c_in_x     <= prev_q[beat];
-                    c_in_y     <= ref_q[beat];
-                    c_in_dest  <= with_xor ? dest_q[beat] : 512'd0;
-                    c_in_last  <= (beat == 5'd15);
-                    c_in_valid <= 1'b1;
                     if (c_in_valid && c_in_ready) begin
                         if (beat == 5'd15) begin
-                            c_in_valid  <= 1'b0;
                             beat        <= 5'd0;
                             mem_wr_addr <= curr_idx[ADDR_W-1:0];
                             state       <= WRITE;
@@ -432,15 +437,9 @@ module argon2_fill_ctrl #(
                 end
 
                 WRITE: begin
-                    pref_collect();
-                    c_out_ready  <= mem_wr_ready;
-                    mem_wr_valid <= c_out_valid;
-                    mem_wr_data  <= c_out_data;
-                    mem_wr_last  <= c_out_last;
-                    if (c_out_valid && mem_wr_ready && c_out_last) begin
-                        mem_wr_valid <= 1'b0;
-                        state        <= ADVANCE;
-                    end
+                    // (the prefetch collector above also runs in WRITE)
+                    if (c_out_valid && c_out_ready && c_out_last)
+                        state <= ADVANCE;
                 end
 
                 ADVANCE: begin
