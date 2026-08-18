@@ -69,10 +69,13 @@ z  = (start + (|W| − 1 − y)) mod lane_length
   previous block. Reference address is data-dependent — the ref read
   cannot launch until prev has returned.
 - **Argon2i / first half of Argon2id:** J1∥J2 come from G in counter
-  mode (`argon2_addr_gen`, not yet wired into the fill FSM). Addresses
-  for a whole 128-block window are known ahead of time. **Prefetch the
-  random read a full memory latency early.** This is the variant the
-  README targets, and the one where an FPGA actually wins.
+  mode (`argon2_addr_gen`, wired into the fill FSM). Addresses for a
+  whole 128-block window are known ahead of time. The fill controller
+  issues the random ref read *first* (no wait on prev) and launches the
+  next window entry's ref read at the start of G — a full compute
+  latency early, which is also a full memory latency on a well-behaved
+  DDR/HBM port. This is the variant the README targets, and the one
+  where an FPGA actually wins.
 
 Legal `lane_length` is a multiple of 4; on power-of-two memory sizes the
 modulo collapses to a wire.
@@ -106,6 +109,9 @@ All RTL is a single clock, `rst_n` async-assert / sync-deassert. Valid /
 ready on every streaming port. `blamka_g` is a rigid 4-cycle pipe
 (back-to-back capable). `argon2_p` is not yet fully streaming — it
 accepts one P at a time — which is fine until we add a second inflight G.
+`argon2_addr_gen` reuses a private `argon2_compress` (two G's per 128
+addresses, ~1 % of a 128-block window). The fill controller has its own
+G so address generation of the next window can later overlap a fill.
 
 ## What is implemented vs. stubbed
 
@@ -115,18 +121,19 @@ accepts one P at a time — which is fine until we add a second inflight G.
 | `blamka_g` (4-stage) | Written |
 | `argon2_p`, `argon2_compress` | Written |
 | `argon2_index`, `argon2_ref_area` | Written |
-| `argon2_fill_ctrl` | Skeleton: argon2d-style J1/J2, dest-xor not fetched, no addr-gen |
-| `argon2_addr_gen` (argon2i PRNG) | Not yet — next |
+| `argon2_fill_ctrl` | One-lane job: argon2i/d/id, dest-xor fetch, ref prefetch |
+| `argon2_addr_gen` (argon2i PRNG) | Two G's in counter mode, 128 J1∥J2 / window |
 | AXI-MM / F1 shell | Not yet |
 | Python golden model + RFC 9106 §5 | Passing |
+| Icarus benches + CI | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill |
 
 ## Verification plan
 
 1. **Now:** `python3 -m unittest` against RFC 7693 and RFC 9106 §5.
    The golden model *is* the spec the RTL is written to.
-2. **Next, with Icarus / Verilator:** self-checking benches under `sim/`
-   drive `blake2b_g`, `blamka_g`, `argon2_compress` with vectors dumped
-   from `ref/`.
+2. **Now, with Icarus:** `make sim` runs the self-checking benches under
+   `sim/` (vectors dumped from `ref/` via `python3 -m tests.dump_vectors`).
+   The fill KAT is p=1 / m=8 KiB / t=2 for all three types.
 3. **On F1:** one-channel known-answer (the 32 KiB RFC vector fits in
    BRAM — use it as a unit test before touching DDR) then a DDR
    bandwidth microbench (`cl_dram_dma` hello-world).
