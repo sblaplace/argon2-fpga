@@ -120,28 +120,27 @@ module tb_argon2_fill;
         if (!done) begin
             $display("FAIL %s timeout", name);
             errors = errors + 1;
-            disable run_job;
-        end
-
-        // Let the last write NBA settle.
-        @(posedge clk);
-        @(posedge clk);
-
-        mismatches = 0;
-        for (i = 0; i < NBLK * NBEAT; i = i + 1) begin
-            if (mem[i] !== exp[i]) begin
-                if (mismatches < 4)
-                    $display("FAIL %s beat %0d got %0128h exp %0128h",
-                             name, i, mem[i], exp[i]);
-                mismatches = mismatches + 1;
-            end
-        end
-        if (mismatches != 0) begin
-            $display("FAIL %s %0d beat(s) differ (%0d cycles)",
-                     name, mismatches, cycles);
-            errors = errors + 1;
         end else begin
-            $display("  %s PASS (%0d cycles)", name, cycles);
+            // Let the last write NBA settle.
+            @(posedge clk);
+            @(posedge clk);
+
+            mismatches = 0;
+            for (i = 0; i < NBLK * NBEAT; i = i + 1) begin
+                if (mem[i] !== exp[i]) begin
+                    if (mismatches < 4)
+                        $display("FAIL %s beat %0d got %0128h exp %0128h",
+                                 name, i, mem[i], exp[i]);
+                    mismatches = mismatches + 1;
+                end
+            end
+            if (mismatches != 0) begin
+                $display("FAIL %s %0d beat(s) differ (%0d cycles)",
+                         name, mismatches, cycles);
+                errors = errors + 1;
+            end else begin
+                $display("  %s PASS (%0d cycles)", name, cycles);
+            end
         end
     endtask
 

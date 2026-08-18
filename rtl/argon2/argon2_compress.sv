@@ -103,25 +103,25 @@ module argon2_compress (
                     in_ready <= 1'b0;
                     if (group < 5'd8) begin
                         for (i = 0; i < 16; i = i + 1)
-                            p_in[i] <= blk[group*16 + i];
+                            p_in[64*i +: 64] <= blk[group*16 + i];
                     end else begin
                         col = group[3:0] - 4'd8;
-                        p_in[0]  <= blk[2*col + 0];
-                        p_in[1]  <= blk[2*col + 1];
-                        p_in[2]  <= blk[2*col + 16];
-                        p_in[3]  <= blk[2*col + 17];
-                        p_in[4]  <= blk[2*col + 32];
-                        p_in[5]  <= blk[2*col + 33];
-                        p_in[6]  <= blk[2*col + 48];
-                        p_in[7]  <= blk[2*col + 49];
-                        p_in[8]  <= blk[2*col + 64];
-                        p_in[9]  <= blk[2*col + 65];
-                        p_in[10] <= blk[2*col + 80];
-                        p_in[11] <= blk[2*col + 81];
-                        p_in[12] <= blk[2*col + 96];
-                        p_in[13] <= blk[2*col + 97];
-                        p_in[14] <= blk[2*col + 112];
-                        p_in[15] <= blk[2*col + 113];
+                        p_in[64*0 +: 64] <= blk[2*col + 0];
+                        p_in[64*1 +: 64] <= blk[2*col + 1];
+                        p_in[64*2 +: 64] <= blk[2*col + 16];
+                        p_in[64*3 +: 64] <= blk[2*col + 17];
+                        p_in[64*4 +: 64] <= blk[2*col + 32];
+                        p_in[64*5 +: 64] <= blk[2*col + 33];
+                        p_in[64*6 +: 64] <= blk[2*col + 48];
+                        p_in[64*7 +: 64] <= blk[2*col + 49];
+                        p_in[64*8 +: 64] <= blk[2*col + 64];
+                        p_in[64*9 +: 64] <= blk[2*col + 65];
+                        p_in[64*10 +: 64] <= blk[2*col + 80];
+                        p_in[64*11 +: 64] <= blk[2*col + 81];
+                        p_in[64*12 +: 64] <= blk[2*col + 96];
+                        p_in[64*13 +: 64] <= blk[2*col + 97];
+                        p_in[64*14 +: 64] <= blk[2*col + 112];
+                        p_in[64*15 +: 64] <= blk[2*col + 113];
                     end
                     p_in_valid <= 1'b1;
                     state      <= WAIT_P;
@@ -131,25 +131,25 @@ module argon2_compress (
                     if (p_out_valid) begin
                         if (group < 5'd8) begin
                             for (i = 0; i < 16; i = i + 1)
-                                blk[group*16 + i] <= p_out[i];
+                                blk[group*16 + i] <= p_out[64*i +: 64];
                         end else begin
                             col = group[3:0] - 4'd8;
-                            blk[2*col + 0]   <= p_out[0];
-                            blk[2*col + 1]   <= p_out[1];
-                            blk[2*col + 16]  <= p_out[2];
-                            blk[2*col + 17]  <= p_out[3];
-                            blk[2*col + 32]  <= p_out[4];
-                            blk[2*col + 33]  <= p_out[5];
-                            blk[2*col + 48]  <= p_out[6];
-                            blk[2*col + 49]  <= p_out[7];
-                            blk[2*col + 64]  <= p_out[8];
-                            blk[2*col + 65]  <= p_out[9];
-                            blk[2*col + 80]  <= p_out[10];
-                            blk[2*col + 81]  <= p_out[11];
-                            blk[2*col + 96]  <= p_out[12];
-                            blk[2*col + 97]  <= p_out[13];
-                            blk[2*col + 112] <= p_out[14];
-                            blk[2*col + 113] <= p_out[15];
+                            blk[2*col + 0] <= p_out[64*0 +: 64];
+                            blk[2*col + 1] <= p_out[64*1 +: 64];
+                            blk[2*col + 16] <= p_out[64*2 +: 64];
+                            blk[2*col + 17] <= p_out[64*3 +: 64];
+                            blk[2*col + 32] <= p_out[64*4 +: 64];
+                            blk[2*col + 33] <= p_out[64*5 +: 64];
+                            blk[2*col + 48] <= p_out[64*6 +: 64];
+                            blk[2*col + 49] <= p_out[64*7 +: 64];
+                            blk[2*col + 64] <= p_out[64*8 +: 64];
+                            blk[2*col + 65] <= p_out[64*9 +: 64];
+                            blk[2*col + 80] <= p_out[64*10 +: 64];
+                            blk[2*col + 81] <= p_out[64*11 +: 64];
+                            blk[2*col + 96] <= p_out[64*12 +: 64];
+                            blk[2*col + 97] <= p_out[64*13 +: 64];
+                            blk[2*col + 112] <= p_out[64*14 +: 64];
+                            blk[2*col + 113] <= p_out[64*15 +: 64];
                         end
                         if (group == 5'd15) begin
                             beat  <= 5'd0;
