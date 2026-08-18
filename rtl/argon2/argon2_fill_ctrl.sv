@@ -3,16 +3,22 @@
 //
 // Assumes B[0] and B[1] have already been written (H' of H0). Walks
 // columns 2 .. lane_length-1 for each pass / slice, issuing:
-//   1. compute (lane, index) of the reference block   [argon2i: prefetchable]
-//   2. read prev block (usually sequential, cacheable)
-//   3. read ref  block (random)
-//   4. G(prev, ref) [⊕ dest on later passes]
-//   5. write dest
+//   1. compute (lane, index) of the reference block
+//        argon2i / first half of argon2id: G in counter mode, known
+//        a whole 128-block window ahead — the random read is issued
+//        at the start of G so it is a full compute-latency early.
+//        argon2d: J1||J2 = first 8 bytes of the previous block.
+//   2. read prev block (sequential, cacheable)
+//   3. read ref  block (random) — first, when the address is independent
+//   4. on pass > 0, read dest (v1.3 XOR)
+//   5. G(prev, ref) [⊕ dest]
+//   6. write dest
 //
 // Memory port is block-addressed: the interconnect (AWS F1 CL_DRAM_DMA,
-// AXI-MM, HBM) is responsible for bursting 1024-byte blocks. One
-// outstanding read is enough to start; a production core should issue
-// the argon2i reference read a full memory-latency early.
+// AXI-MM, HBM) bursts 1024-byte blocks. One outstanding read.
+//
+// v1 walks one lane for the whole job (p = 1). Multi-lane jobs need a
+// slice barrier between lanes; that is a later wrapper.
 
 `timescale 1ns / 1ps
 
@@ -49,15 +55,20 @@ module argon2_fill_ctrl #(
 );
     localparam int SYNC = 4;
 
-    typedef enum logic [3:0] {
+    typedef enum logic [4:0] {
         IDLE,
-        NEXT_POS,
-        ISSUE_PREV,
-        COLLECT_PREV,
+        SEG_PREP,
+        ADDR_WAIT,
+        DISPATCH,
         ISSUE_REF,
         COLLECT_REF,
+        ISSUE_PREV,
+        COLLECT_PREV,
+        ISSUE_DEST,
+        COLLECT_DEST,
         COMPRESS,
-        WRITE
+        WRITE,
+        ADVANCE
     } state_t;
     state_t state;
 
@@ -70,7 +81,10 @@ module argon2_fill_ctrl #(
     logic [511:0] prev_q [0:15];
     logic [511:0] ref_q  [0:15];
     logic [511:0] dest_q [0:15];
+    logic [511:0] pref_q [0:15];
     logic [4:0]   beat;
+    logic [4:0]   pref_beat;
+    logic         pref_issued, pref_ready;
 
     // Compress streaming
     logic         c_in_valid, c_in_ready, c_in_last;
@@ -94,9 +108,10 @@ module argon2_fill_ctrl #(
         .out_last (c_out_last)
     );
 
-    // Index datapath
+    // Current-position index_alpha
     logic [31:0] j1, ref_area, start_pos, z;
     logic        same_lane;
+    logic [63:0] pseudo_rand, prev_word0, addr_word, addr_word_n;
 
     argon2_ref_area u_area (
         .pass           (pass_r),
@@ -117,13 +132,52 @@ module argon2_fill_ctrl #(
         .ref_index      (z)
     );
 
-    // Address-block PRNG for argon2i / first half of argon2id is left to
-    // a follow-on module (argon2_addr_gen). For argon2d, J1||J2 is the
-    // first 64 bits of the previous block — wired here.
-    logic [63:0] prev_word0;
+    // Lookahead index_alpha (next column, same window) for the prefetch.
+    logic [31:0] index_n, j1_n, ref_area_n, start_pos_n, z_n, ref_lane_n, ref_idx_n;
+    logic        same_lane_n, can_prefetch;
+
+    argon2_ref_area u_area_n (
+        .pass           (pass_r),
+        .slice          (slice_r),
+        .index          (index_n),
+        .lane_length    (lane_length),
+        .segment_length (segment_length),
+        .same_lane      (same_lane_n),
+        .ref_area       (ref_area_n),
+        .start_position (start_pos_n)
+    );
+
+    argon2_index u_idx_n (
+        .j1             (j1_n),
+        .ref_area       (ref_area_n),
+        .start_position (start_pos_n),
+        .lane_length    (lane_length),
+        .ref_index      (z_n)
+    );
+
+    logic        a_init, a_start, a_busy, a_done;
+
+    argon2_addr_gen u_addr (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .init          (a_init),
+        .pass          (pass_r),
+        .lane          (lane_id),
+        .slice         (slice_r),
+        .memory_blocks (memory_blocks),
+        .time_cost     (passes),
+        .type_i        ({30'd0, type_i}),
+        .start         (a_start),
+        .busy          (a_busy),
+        .done          (a_done),
+        .rd_idx        (index_r[6:0]),
+        .rd_j          (addr_word),
+        .rd_idx_b      (index_n[6:0]),
+        .rd_j_b        (addr_word_n)
+    );
 
     always_comb begin
-        segment_length = lane_length >> 2; // / SYNC
+        segment_length = lane_length / SYNC;
         independent = (type_i == 2'd1) ||
                       (type_i == 2'd2 && pass_r == 32'd0 && slice_r < 32'd2);
         with_xor = (pass_r != 32'd0);
@@ -132,12 +186,24 @@ module argon2_fill_ctrl #(
                  ? (curr_idx + lane_length - 32'd1)
                  : (curr_idx - 32'd1);
         prev_word0 = prev_q[0][63:0];
-        j1 = prev_word0[31:0];
+        pseudo_rand = independent ? addr_word : prev_word0;
+        j1 = pseudo_rand[31:0];
         ref_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
                  ? lane_id
-                 : prev_word0[63:32] % lanes;
+                 : pseudo_rand[63:32] % lanes;
         same_lane = (ref_lane == lane_id);
         ref_idx = ref_lane * lane_length + z;
+
+        index_n = index_r + 32'd1;
+        j1_n = addr_word_n[31:0];
+        ref_lane_n = ((pass_r == 32'd0) && (slice_r == 32'd0))
+                   ? lane_id
+                   : addr_word_n[63:32] % lanes;
+        same_lane_n = (ref_lane_n == lane_id);
+        ref_idx_n = ref_lane_n * lane_length + z_n;
+        can_prefetch = independent
+                    && (index_n < segment_length)
+                    && (index_n[6:0] != 7'd0);
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -149,57 +215,114 @@ module argon2_fill_ctrl #(
             mem_wr_valid <= 1'b0;
             c_in_valid   <= 1'b0;
             c_out_ready  <= 1'b0;
+            a_init       <= 1'b0;
+            a_start      <= 1'b0;
             pass_r       <= 32'd0;
             slice_r      <= 32'd0;
             index_r      <= 32'd0;
             beat         <= 5'd0;
+            pref_beat    <= 5'd0;
+            pref_issued  <= 1'b0;
+            pref_ready   <= 1'b0;
+            mem_rd_addr  <= '0;
+            mem_wr_addr  <= '0;
+            mem_wr_data  <= '0;
+            mem_wr_last  <= 1'b0;
         end else begin
             done        <= 1'b0;
+            a_init      <= 1'b0;
+            a_start     <= 1'b0;
             c_out_ready <= 1'b0;
+
+            // Prefetch collector: the random read launched at the start of G
+            // returns during COMPRESS / WRITE / ADVANCE.
+            if ((state == COMPRESS || state == WRITE || state == ADVANCE)
+                    && pref_issued && !pref_ready) begin
+                if (mem_rd_valid && mem_rd_ready)
+                    mem_rd_valid <= 1'b0;
+                if (mem_rd_data_v) begin
+                    pref_q[pref_beat] <= mem_rd_data;
+                    if (mem_rd_last || pref_beat == 5'd15) begin
+                        pref_ready <= 1'b1;
+                        pref_beat  <= 5'd0;
+                    end else begin
+                        pref_beat <= pref_beat + 5'd1;
+                    end
+                end
+            end
 
             case (state)
                 IDLE: begin
                     busy <= 1'b0;
                     if (start) begin
-                        busy    <= 1'b1;
-                        pass_r  <= 32'd0;
-                        slice_r <= 32'd0;
-                        index_r <= 32'd2; // B[0], B[1] already filled
-                        state   <= NEXT_POS;
+                        busy        <= 1'b1;
+                        pass_r      <= 32'd0;
+                        slice_r     <= 32'd0;
+                        index_r     <= 32'd2; // B[0], B[1] already filled
+                        pref_issued <= 1'b0;
+                        pref_ready  <= 1'b0;
+                        state       <= SEG_PREP;
                     end
                 end
 
-                NEXT_POS: begin
+                SEG_PREP: begin
                     if (pass_r == passes) begin
                         busy  <= 1'b0;
                         done  <= 1'b1;
                         state <= IDLE;
+                    end else if (index_r >= segment_length) begin
+                        // Empty first segment (q/4 == 2): skip to the next.
+                        state <= ADVANCE;
+                    end else if (independent) begin
+                        a_init  <= 1'b1;
+                        a_start <= 1'b1;
+                        state   <= ADDR_WAIT;
                     end else begin
-                        beat         <= 5'd0;
+                        state <= DISPATCH;
+                    end
+                end
+
+                ADDR_WAIT: begin
+                    if (a_done) begin
+                        if (index_r >= segment_length)
+                            state <= ADVANCE;
+                        else
+                            state <= DISPATCH;
+                    end
+                end
+
+                DISPATCH: begin
+                    beat <= 5'd0;
+                    if (independent && pref_ready) begin
+                        ref_q[0]  <= pref_q[0];
+                        ref_q[1]  <= pref_q[1];
+                        ref_q[2]  <= pref_q[2];
+                        ref_q[3]  <= pref_q[3];
+                        ref_q[4]  <= pref_q[4];
+                        ref_q[5]  <= pref_q[5];
+                        ref_q[6]  <= pref_q[6];
+                        ref_q[7]  <= pref_q[7];
+                        ref_q[8]  <= pref_q[8];
+                        ref_q[9]  <= pref_q[9];
+                        ref_q[10] <= pref_q[10];
+                        ref_q[11] <= pref_q[11];
+                        ref_q[12] <= pref_q[12];
+                        ref_q[13] <= pref_q[13];
+                        ref_q[14] <= pref_q[14];
+                        ref_q[15] <= pref_q[15];
+                        pref_ready  <= 1'b0;
+                        pref_issued <= 1'b0;
                         mem_rd_addr  <= prev_idx[ADDR_W-1:0];
                         mem_rd_valid <= 1'b1;
                         state        <= ISSUE_PREV;
-                    end
-                end
-
-                ISSUE_PREV: begin
-                    if (mem_rd_ready) begin
-                        mem_rd_valid <= 1'b0;
-                        state        <= COLLECT_PREV;
-                    end
-                end
-
-                COLLECT_PREV: begin
-                    if (mem_rd_data_v) begin
-                        prev_q[beat] <= mem_rd_data;
-                        if (mem_rd_last || beat == 5'd15) begin
-                            beat         <= 5'd0;
-                            mem_rd_addr  <= ref_idx[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
-                            state        <= ISSUE_REF;
-                        end else begin
-                            beat <= beat + 5'd1;
-                        end
+                    end else if (independent) begin
+                        mem_rd_addr  <= ref_idx[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        state        <= ISSUE_REF;
+                    end else begin
+                        mem_rd_addr  <= prev_idx[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        state        <= ISSUE_PREV;
                     end
                 end
 
@@ -214,6 +337,66 @@ module argon2_fill_ctrl #(
                     if (mem_rd_data_v) begin
                         ref_q[beat] <= mem_rd_data;
                         if (mem_rd_last || beat == 5'd15) begin
+                            beat <= 5'd0;
+                            if (independent) begin
+                                mem_rd_addr  <= prev_idx[ADDR_W-1:0];
+                                mem_rd_valid <= 1'b1;
+                                state        <= ISSUE_PREV;
+                            end else if (with_xor) begin
+                                mem_rd_addr  <= curr_idx[ADDR_W-1:0];
+                                mem_rd_valid <= 1'b1;
+                                state        <= ISSUE_DEST;
+                            end else begin
+                                state <= COMPRESS;
+                            end
+                        end else begin
+                            beat <= beat + 5'd1;
+                        end
+                    end
+                end
+
+                ISSUE_PREV: begin
+                    if (mem_rd_ready) begin
+                        mem_rd_valid <= 1'b0;
+                        state        <= COLLECT_PREV;
+                    end
+                end
+
+                COLLECT_PREV: begin
+                    if (mem_rd_data_v) begin
+                        prev_q[beat] <= mem_rd_data;
+                        if (mem_rd_last || beat == 5'd15) begin
+                            beat <= 5'd0;
+                            if (!independent) begin
+                                // J1||J2 now live in prev_q[0]; combo ref_idx
+                                // updates this cycle, issue next cycle.
+                                mem_rd_addr  <= ref_idx[ADDR_W-1:0];
+                                mem_rd_valid <= 1'b1;
+                                state        <= ISSUE_REF;
+                            end else if (with_xor) begin
+                                mem_rd_addr  <= curr_idx[ADDR_W-1:0];
+                                mem_rd_valid <= 1'b1;
+                                state        <= ISSUE_DEST;
+                            end else begin
+                                state <= COMPRESS;
+                            end
+                        end else begin
+                            beat <= beat + 5'd1;
+                        end
+                    end
+                end
+
+                ISSUE_DEST: begin
+                    if (mem_rd_ready) begin
+                        mem_rd_valid <= 1'b0;
+                        state        <= COLLECT_DEST;
+                    end
+                end
+
+                COLLECT_DEST: begin
+                    if (mem_rd_data_v) begin
+                        dest_q[beat] <= mem_rd_data;
+                        if (mem_rd_last || beat == 5'd15) begin
                             beat  <= 5'd0;
                             state <= COMPRESS;
                         end else begin
@@ -223,13 +406,17 @@ module argon2_fill_ctrl #(
                 end
 
                 COMPRESS: begin
-                    // Hold a beat until G accepts it so data and valid
-                    // line up on the same cycle. Dest-xor (pass > 0)
-                    // currently feeds zeros — a production core must
-                    // also read the destination block.
+                    // Launch the next random read as soon as this G starts
+                    // so it is a full compute-latency early.
+                    if (can_prefetch && !pref_issued && !pref_ready && !mem_rd_valid) begin
+                        mem_rd_addr  <= ref_idx_n[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        pref_issued  <= 1'b1;
+                        pref_beat    <= 5'd0;
+                    end
                     c_in_x     <= prev_q[beat];
                     c_in_y     <= ref_q[beat];
-                    c_in_dest  <= 512'd0;
+                    c_in_dest  <= with_xor ? dest_q[beat] : 512'd0;
                     c_in_last  <= (beat == 5'd15);
                     c_in_valid <= 1'b1;
                     if (c_in_valid && c_in_ready) begin
@@ -245,31 +432,44 @@ module argon2_fill_ctrl #(
                 end
 
                 WRITE: begin
+                    pref_collect();
                     c_out_ready  <= mem_wr_ready;
                     mem_wr_valid <= c_out_valid;
                     mem_wr_data  <= c_out_data;
                     mem_wr_last  <= c_out_last;
                     if (c_out_valid && mem_wr_ready && c_out_last) begin
                         mem_wr_valid <= 1'b0;
-                        // Advance (index, slice, pass).
-                        if (index_r + 32'd1 == segment_length) begin
-                            index_r <= (pass_r == 32'd0 && slice_r + 32'd1 == 32'd0)
-                                     ? 32'd2 : 32'd0;
-                            // After slice 0 of pass 0, subsequent segments
-                            // start at 0. (The ternary above is never 2 —
-                            // kept as documentation of the first-segment rule,
-                            // which is applied only at job start.)
-                            index_r <= 32'd0;
-                            if (slice_r + 32'd1 == 32'd4) begin
-                                slice_r <= 32'd0;
-                                pass_r  <= pass_r + 32'd1;
-                            end else begin
-                                slice_r <= slice_r + 32'd1;
-                            end
+                        state        <= ADVANCE;
+                    end
+                end
+
+                ADVANCE: begin
+                    // Finish collecting a prefetch that outlived the write.
+                    if (pref_issued && !pref_ready) begin
+                        state <= ADVANCE;
+                    end else if (index_r >= segment_length
+                              || index_r + 32'd1 == segment_length) begin
+                        pref_issued <= 1'b0;
+                        pref_ready  <= 1'b0;
+                        if (slice_r + 32'd1 == 32'd4) begin
+                            slice_r <= 32'd0;
+                            pass_r  <= pass_r + 32'd1;
                         end else begin
-                            index_r <= index_r + 32'd1;
+                            slice_r <= slice_r + 32'd1;
                         end
-                        state <= NEXT_POS;
+                        index_r <= 32'd0;
+                        state   <= SEG_PREP;
+                    end else begin
+                        index_r <= index_r + 32'd1;
+                        if (independent && ((index_r + 32'd1) & 32'd127) == 32'd0) begin
+                            // New 128-block window, same Z: increment counter.
+                            pref_issued <= 1'b0;
+                            pref_ready  <= 1'b0;
+                            a_start     <= 1'b1;
+                            state       <= ADDR_WAIT;
+                        end else begin
+                            state <= DISPATCH;
+                        end
                     end
                 end
 
@@ -277,8 +477,4 @@ module argon2_fill_ctrl #(
             endcase
         end
     end
-
-    // Silence unused (address-gen hook).
-    logic _unused_independent;
-    assign _unused_independent = independent;
 endmodule

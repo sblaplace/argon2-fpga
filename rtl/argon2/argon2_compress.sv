@@ -39,10 +39,10 @@ module argon2_compress (
 
     logic [4:0] beat;
     logic [4:0] group;     // 0..15 : rows 0..7 then cols 0..7
-    logic       p_in_valid;
-    logic       p_out_valid;
-    logic [63:0] p_in  [0:15];
-    logic [63:0] p_out [0:15];
+    logic         p_in_valid;
+    logic         p_out_valid;
+    logic [1023:0] p_in;
+    logic [1023:0] p_out;
 
     argon2_p u_p (
         .clk      (clk),
@@ -56,6 +56,11 @@ module argon2_compress (
     integer i;
     logic [63:0] xv, yv, dv, rv;
     logic [3:0]  col;
+    logic [4:0]  drain_idx;
+
+    always_comb begin
+        drain_idx = out_valid ? (beat + 5'd1) : 5'd0;
+    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -157,31 +162,38 @@ module argon2_compress (
                 end
 
                 DRAIN: begin
-                    if (!out_valid || out_ready) begin
+                    // Present beat 0 on entry (out_valid is 0), then advance
+                    // only after the current beat is accepted. Finish on the
+                    // handshake of the last beat — *not* on the cycle we
+                    // first drive it, or a continuously-ready sink drops it.
+                    if (out_valid && out_ready && out_last) begin
+                        out_valid <= 1'b0;
+                        out_last  <= 1'b0;
+                        beat      <= 5'd0;
+                        in_ready  <= 1'b1;
+                        state     <= LOAD;
+                    end else if (!out_valid || out_ready) begin
+                        beat <= out_valid ? (beat + 5'd1) : 5'd0;
                         out_data <= {
-                            blk[beat*WPB + 7] ^ saved[beat*WPB + 7],
-                            blk[beat*WPB + 6] ^ saved[beat*WPB + 6],
-                            blk[beat*WPB + 5] ^ saved[beat*WPB + 5],
-                            blk[beat*WPB + 4] ^ saved[beat*WPB + 4],
-                            blk[beat*WPB + 3] ^ saved[beat*WPB + 3],
-                            blk[beat*WPB + 2] ^ saved[beat*WPB + 2],
-                            blk[beat*WPB + 1] ^ saved[beat*WPB + 1],
-                            blk[beat*WPB + 0] ^ saved[beat*WPB + 0]
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 7]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 7],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 6]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 6],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 5]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 5],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 4]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 4],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 3]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 3],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 2]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 2],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 1]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 1],
+                            blk[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 0]
+                                ^ saved[(out_valid ? beat + 5'd1 : 5'd0)*WPB + 0]
                         };
                         out_valid <= 1'b1;
-                        out_last  <= (beat == 5'd15);
-                        if (beat == 5'd15) begin
-                            // Hold the last beat until accepted, then reload.
-                            if (out_valid && out_ready) begin
-                                out_valid <= 1'b0;
-                                out_last  <= 1'b0;
-                                beat      <= 5'd0;
-                                in_ready  <= 1'b1;
-                                state     <= LOAD;
-                            end
-                        end else begin
-                            beat <= beat + 5'd1;
-                        end
+                        out_last  <= ((out_valid ? beat + 5'd1 : 5'd0) == 5'd15);
                     end
                 end
 

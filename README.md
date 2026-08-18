@@ -67,11 +67,14 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       RFC 9106 §5 (`make test`).
 - [x] Synthesizable SystemVerilog: BlaMka GB, P, G, `index_alpha`, BLAKE2b F,
       and a single-lane fill-controller skeleton (`rtl/`).
-- [ ] Wire argon2i address generation (`G` in counter mode) into the fill FSM
-      and prefetch the random read.
-- [ ] Icarus / Verilator CI for the self-checking benches in `sim/`.
+- [x] Wire argon2i address generation (`G` in counter mode) into the fill FSM
+      and prefetch the random read. Dest-xor (v1.3, pass > 0) is fetched too.
+- [x] Icarus self-checking benches in `sim/` (G, index, addr-gen, 8 KiB fill
+      KAT). Workflow YAML is in [`docs/github-ci.yml`](docs/github-ci.yml)
+      (copy to `.github/workflows/ci.yml` to enable Actions).
 - [ ] AWS F1 hello-world: `cl_dram_dma` multi-channel bandwidth, then one
       known-answer fill (the 32 KiB RFC vector) on a single DDR4 port.
+- [ ] Slice barrier so one job can use p > 1 across cores; v1 is p = 1.
 - [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling.
 
 ## Tree
@@ -79,7 +82,7 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
 ```
 ref/                  RFC-faithful Python (the spec the RTL is written to)
 rtl/blake2b/          BLAKE2b G / round / F / incremental hasher  (H, H')
-rtl/argon2/           BlaMka, P, G, index, fill controller         (the job)
+rtl/argon2/           BlaMka, P, G, index, addr-gen, fill ctrl     (the job)
 sim/                  Icarus benches, vectors from ref/
 docs/                 survey + architecture
 tests/                unittest against RFC 9106 §5
@@ -89,7 +92,7 @@ tests/                unittest against RFC 9106 §5
 
 ```
 make test                 # RFC 7693 + RFC 9106 §5, no simulator needed
-make -C sim               # optional, needs iverilog
+make -C sim               # Icarus self-checks (needs iverilog)
 ```
 
 ## References

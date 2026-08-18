@@ -13,6 +13,7 @@ __pycache__/
 sim/work/
 sim/*.out
 sim/a.out
+sim/gen/
 
 # FPGA / Vivado / Vitis
 *.jou

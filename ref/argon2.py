@@ -169,7 +169,8 @@ def index_alpha(
     return (start + rel) % lane_length
 
 
-def _data_independent(type_: Type, pass_: int, slice_: int) -> bool:
+def data_independent(type_: Type, pass_: int, slice_: int) -> bool:
+    """True when J1∥J2 come from G in counter mode, not from the previous block."""
     if type_ == Type.I:
         return True
     if type_ == Type.ID and pass_ == 0 and slice_ < SYNC_POINTS // 2:
@@ -177,11 +178,143 @@ def _data_independent(type_: Type, pass_: int, slice_: int) -> bool:
     return False
 
 
-def _next_addresses(input_block: list[int]) -> list[int]:
+def _data_independent(type_: Type, pass_: int, slice_: int) -> bool:
+    return data_independent(type_, pass_, slice_)
+
+
+def make_address_input(
+    pass_: int,
+    lane: int,
+    slice_: int,
+    memory_blocks: int,
+    time_cost: int,
+    type_: Type,
+) -> list[int]:
+    """Build the argon2i address-generator input block Z (RFC 9106 §3.4.1).
+
+    Words: pass, lane, slice, m', t, y, counter=0, then zeros.
+    """
+    block = [0] * BLOCK_WORDS
+    block[0] = int(pass_)
+    block[1] = int(lane)
+    block[2] = int(slice_)
+    block[3] = int(memory_blocks)
+    block[4] = int(time_cost)
+    block[5] = int(type_)
+    return block
+
+
+def next_addresses(input_block: list[int]) -> list[int]:
+    """Increment word 6 and return G(0, G(0, input_block)) — 128× J1∥J2."""
     zero = [0] * BLOCK_WORDS
     input_block[6] = (input_block[6] + 1) & MASK64
     addr = compress_g(zero, input_block)
     return compress_g(zero, addr)
+
+
+def _next_addresses(input_block: list[int]) -> list[int]:
+    return next_addresses(input_block)
+
+
+def _derive(
+    *,
+    time_cost: int,
+    memory_cost: int,
+    parallelism: int,
+    hash_len: int,
+) -> tuple[int, int, int]:
+    if parallelism < 1:
+        raise ValueError("parallelism must be >= 1")
+    if time_cost < 1:
+        raise ValueError("time_cost must be >= 1")
+    if memory_cost < 8 * parallelism:
+        raise ValueError("memory_cost must be >= 8 * parallelism")
+    if not 4 <= hash_len <= (1 << 32) - 1:
+        raise ValueError("hash_len out of range")
+    lanes = parallelism
+    memory_blocks = 4 * lanes * (memory_cost // (4 * lanes))
+    lane_length = memory_blocks // lanes
+    return memory_blocks, lane_length, lane_length // SYNC_POINTS
+
+
+def argon2_h0(
+    password: bytes,
+    salt: bytes,
+    *,
+    time_cost: int,
+    memory_cost: int,
+    parallelism: int,
+    hash_len: int,
+    secret: bytes = b"",
+    associated_data: bytes = b"",
+    type_: Type = Type.ID,
+    version: int = VERSION_13,
+) -> bytes:
+    """Pre-hashing digest H0 (RFC 9106 §3.2)."""
+    return blake2b(
+        b"".join(
+            (
+                _le32(parallelism),
+                _le32(hash_len),
+                _le32(memory_cost),
+                _le32(time_cost),
+                _le32(version),
+                _le32(int(type_)),
+                _le32(len(password)),
+                password,
+                _le32(len(salt)),
+                salt,
+                _le32(len(secret)),
+                secret,
+                _le32(len(associated_data)),
+                associated_data,
+            )
+        ),
+        digest_size=64,
+    )
+
+
+def argon2_init_memory(
+    password: bytes,
+    salt: bytes,
+    *,
+    time_cost: int = 3,
+    memory_cost: int = 32,
+    parallelism: int = 4,
+    hash_len: int = 32,
+    secret: bytes = b"",
+    associated_data: bytes = b"",
+    type_: Type = Type.ID,
+    version: int = VERSION_13,
+) -> list[list[int]]:
+    """Allocate m' blocks and write B[i][0], B[i][1] = H'(H0 ∥ …)."""
+    memory_blocks, lane_length, _ = _derive(
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+    )
+    h0 = argon2_h0(
+        password,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+        secret=secret,
+        associated_data=associated_data,
+        type_=type_,
+        version=version,
+    )
+    memory: list[list[int]] = [[0] * BLOCK_WORDS for _ in range(memory_blocks)]
+    for lane in range(parallelism):
+        memory[lane * lane_length + 0] = _words_from_bytes(
+            h_prime(h0 + _le32(0) + _le32(lane), BLOCK_BYTES)
+        )
+        memory[lane * lane_length + 1] = _words_from_bytes(
+            h_prime(h0 + _le32(1) + _le32(lane), BLOCK_BYTES)
+        )
+    return memory
 
 
 def argon2(
@@ -198,59 +331,63 @@ def argon2(
     version: int = VERSION_13,
 ) -> bytes:
     """Compute an Argon2 tag. memory_cost is in KiB."""
-    if parallelism < 1:
-        raise ValueError("parallelism must be >= 1")
-    if time_cost < 1:
-        raise ValueError("time_cost must be >= 1")
-    if memory_cost < 8 * parallelism:
-        raise ValueError("memory_cost must be >= 8 * parallelism")
-    if not 4 <= hash_len <= (1 << 32) - 1:
-        raise ValueError("hash_len out of range")
-
-    lanes = parallelism
-    memory_blocks = 4 * lanes * (memory_cost // (4 * lanes))
-    lane_length = memory_blocks // lanes
-    segment_length = lane_length // SYNC_POINTS
-
-    h0_in = b"".join(
-        (
-            _le32(lanes),
-            _le32(hash_len),
-            _le32(memory_cost),
-            _le32(time_cost),
-            _le32(version),
-            _le32(int(type_)),
-            _le32(len(password)),
-            password,
-            _le32(len(salt)),
-            salt,
-            _le32(len(secret)),
-            secret,
-            _le32(len(associated_data)),
-            associated_data,
-        )
+    tag, _ = argon2_fill(
+        password,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+        secret=secret,
+        associated_data=associated_data,
+        type_=type_,
+        version=version,
     )
-    h0 = blake2b(h0_in, digest_size=64)
+    return tag
 
-    memory: list[list[int]] = [[0] * BLOCK_WORDS for _ in range(memory_blocks)]
 
-    for lane in range(lanes):
-        memory[lane * lane_length + 0] = _words_from_bytes(
-            h_prime(h0 + _le32(0) + _le32(lane), BLOCK_BYTES)
-        )
-        memory[lane * lane_length + 1] = _words_from_bytes(
-            h_prime(h0 + _le32(1) + _le32(lane), BLOCK_BYTES)
-        )
+def argon2_fill(
+    password: bytes,
+    salt: bytes,
+    *,
+    time_cost: int = 3,
+    memory_cost: int = 32,
+    parallelism: int = 4,
+    hash_len: int = 32,
+    secret: bytes = b"",
+    associated_data: bytes = b"",
+    type_: Type = Type.ID,
+    version: int = VERSION_13,
+) -> tuple[bytes, list[list[int]]]:
+    """Like argon2(), but also return the m' working set after the last pass."""
+    memory_blocks, lane_length, segment_length = _derive(
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+    )
+    memory = argon2_init_memory(
+        password,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+        secret=secret,
+        associated_data=associated_data,
+        type_=type_,
+        version=version,
+    )
 
     for pass_ in range(time_cost):
         for slice_ in range(SYNC_POINTS):
-            for lane in range(lanes):
+            for lane in range(parallelism):
                 _fill_segment(
                     memory,
                     pass_=pass_,
                     slice_=slice_,
                     lane=lane,
-                    lanes=lanes,
+                    lanes=parallelism,
                     lane_length=lane_length,
                     segment_length=segment_length,
                     memory_blocks=memory_blocks,
@@ -259,11 +396,12 @@ def argon2(
                 )
 
     c = [0] * BLOCK_WORDS
-    for lane in range(lanes):
+    for lane in range(parallelism):
         last = memory[lane * lane_length + lane_length - 1]
         for i in range(BLOCK_WORDS):
             c[i] ^= last[i]
-    return h_prime(_bytes_from_words(c), hash_len)
+    tag = h_prime(_bytes_from_words(c), hash_len)
+    return tag, memory
 
 
 def _fill_segment(
@@ -280,15 +418,10 @@ def _fill_segment(
     type_: Type,
 ) -> None:
     independent = _data_independent(type_, pass_, slice_)
-    input_block = [0] * BLOCK_WORDS
+    input_block = make_address_input(
+        pass_, lane, slice_, memory_blocks, time_cost, type_
+    )
     address_block: list[int] = []
-    if independent:
-        input_block[0] = pass_
-        input_block[1] = lane
-        input_block[2] = slice_
-        input_block[3] = memory_blocks
-        input_block[4] = time_cost
-        input_block[5] = int(type_)
 
     starting = 2 if pass_ == 0 and slice_ == 0 else 0
     # PHC reference: pre-generate the first address block only for the
