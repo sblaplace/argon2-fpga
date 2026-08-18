@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Simulation
+*.vcd
+*.fst
+*.lxt
+*.o
+sim/work/
+sim/*.out
+sim/a.out
+
+# FPGA / Vivado / Vitis
+*.jou
+*.log
+*.str
+*.pb
+.Xil/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+*.xpr
+*.bit
+*.ltx
+*.mcs
+
+# Editor
+.idea/
+.vscode/
+*~
