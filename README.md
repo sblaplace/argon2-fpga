@@ -83,7 +83,10 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       slave + a p=4 slice-sync barrier. See `fpga/f1/README.md`.
 - [ ] AWS F1 hello-world: build the shell, run the 32 KiB RFC vector on a
       single DDR4 port (sim KAT already exists), then `cl_dram_dma`
-      multi-channel bandwidth.
+      multi-channel bandwidth. Bring-up checklist, host driver, and
+      DDR bandwidth microbench are in [`docs/F1_BRINGUP.md`](docs/F1_BRINGUP.md),
+      [`fpga/f1/host/argon2_cl.c`](fpga/f1/host/argon2_cl.c), and
+      [`fpga/f1/host/bw_test.c`](fpga/f1/host/bw_test.c) (`fpga/f1/build.sh`).
 - [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling.
 
 ## Tree
