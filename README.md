@@ -78,8 +78,12 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       (`argon2_fill_job`); locked to the RFC 9106 §5 32 KiB vector.
 - [x] AXI4-MM adapter (`argon2_axi_mm` / `argon2_fill_axi`): 512-bit,
       16-beat bursts, independent R/W so a prefetch can overlap a write.
-- [ ] AWS F1 hello-world: `cl_dram_dma` multi-channel bandwidth, then the
-      32 KiB RFC vector on a single DDR4 port (the sim KAT already exists).
+- [x] F1 CL shell scaffold (`fpga/f1/`): `cl_argon2` top mapping the
+      `cl_dram_dma` port list onto 4× `argon2_fill_axi` + an OCL register
+      slave + a p=4 slice-sync barrier. See `fpga/f1/README.md`.
+- [ ] AWS F1 hello-world: build the shell, run the 32 KiB RFC vector on a
+      single DDR4 port (sim KAT already exists), then `cl_dram_dma`
+      multi-channel bandwidth.
 - [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling.
 
 ## Tree
