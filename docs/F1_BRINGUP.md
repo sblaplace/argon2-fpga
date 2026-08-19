@@ -12,9 +12,9 @@ The job below moves that same bench from simulation to the wire.
 |---|-----------|-------|-------------------|----------------|
 | 1 | 32 KiB RFC vector in BRAM | CL logic only, no DDR | Whole working set matches `sim/gen/rfc_i_exp.hex` | The fill pipeline is bit-correct before DRAM is involved |
 | 2 | DDR bandwidth microbench | `sh_ddr` AXI, no argon2 logic | Each channel ≈ 12-15 GB/s bursts, 4 channels isolated (no cross-interference) | Bandwidth × channel count is the only number that matters (see `docs/ARCHITECTURE.md`) |
-| 3a | 32 KiB RFC vector on 1 DDR | 1× `argon2_fill_axi` + 1× DDR + OCL | Same working-set match as #1, but through DDR | Address generation, 512-bit 16-beat bursts, prefetch, and AXI are correct on the wire |
+| 3a | 8 KiB p=1 KAT on 1 DDR | 1× `argon2_fill_axi` + 1× DDR + OCL | Same working-set match as `sim/tb_argon2_axi.sv`, but through DDR | Address generation, 512-bit 16-beat bursts, prefetch, and AXI are correct on the wire |
 | 3b | 8 KiB p=1 job on 4 DDRs (independent) | 4× `argon2_fill_axi`, p4_mode=0 | Four lanes each match `sim/gen/fill_i_exp.hex` (`tb_cl_argon2` in sim) | Replication and OCL fan-out work; this is the “4 candidates per FPGA” mode |
-| 3c | 32 KiB p=4 job across 4 DDRs | 4× `argon2_fill_axi`, p4_mode=1, slice barrier | Working set matches `sim/gen/rfc_i_exp.hex` with p=4 | The partitioned-bandwidth thesis — one job, four isolated ports, barrier at each slice |
+| 3c (deferred) | 32 KiB p=4 job across 4 DDRs | Add owner-channel read crossbar, response tags, and slice barrier | Working set matches `sim/gen/rfc_i_exp.hex` with p=4 | Argon2 references other lanes; a barrier alone cannot connect partitioned memories |
 
 Per-argon2 bandwidth at 1 GiB / t=4 / p=1 is ≈ 4 GB random + 4 GB sequential reads + 4 GB writes ≈ 12 GB of DRAM traffic. A single Kintex SODIMM (≈ 5 GB/s random) caps a huge fabric at ~1 cand/s; each independent F1 DDR channel at ~10-12 GB/s random should sustain ~1-1.2 cand/s, so `f1.2xlarge` is a ~4 cand/s machine and an HBM2 Alveo U50 (32 pseudo-channels) is a ~tens cand/s machine. The bring-up measures the ceiling before we try to beat it.
 
@@ -80,23 +80,26 @@ Expected on `f1.2xlarge` (DDR4-2400, 64-bit DIMM per channel): ~12-15 GB/s seque
 
 ## 4. Stage 3 — Full argon2 job on DDR
 
-### 4a. Single DDR, RFC 32 KiB vector
+### 4a. Single DDR, 8 KiB p=1 KAT
 
-This is `sim/tb_argon2_axi.sv` moved to the wire with one `argon2_fill_axi`:
+This is `sim/tb_argon2_axi.sv` moved to the wire with one `argon2_fill_axi`.
+The published 32 KiB RFC vector is a p=4 job and cannot be relabeled p=1;
+run it in the four-channel step immediately afterward.
 
 ```bash
 gcc -I$AWS_FPGA_REPO_DIR/sdk/userspace/include \
     -L$AWS_FPGA_REPO_DIR/sdk/userspace/lib -lfpga_mgmt -lfpga_pci \
     fpga/f1/host/argon2_cl.c -o argon2_cl
 
-# Program lane 0 for the RFC 32 KiB p=1 slice (q = m'/p = 8) as a smoke:
-sudo ./argon2_cl --type i --passes 3 --lane-len 8 --mem-blocks 32 --base 0 \
-                 --channel 0 --init sim/gen/rfc_i_init.hex --expect sim/gen/rfc_i_exp.hex
+# Program channel 0 for the same p=1 KAT used by tb_argon2_axi:
+sudo ./argon2_cl --type i --passes 2 --lane-len 8 --mem-blocks 8 --base 0 \
+                 --channel 0 --init sim/gen/fill_i_init.hex --expect sim/gen/fill_i_exp.hex
 
-# Then the real RFC p=4 vector via the CL's p4_mode (all 4 DDRs, one job):
-sudo ./argon2_cl --type i --passes 3 --lane-len 8 --mem-blocks 32 --p4 \
-                 --base 0 --init sim/gen/rfc_i_init.hex --expect sim/gen/rfc_i_exp.hex
 ```
+
+Do not run the old `--p4` hardware command yet. The host rejects it until
+cross-lane reference reads can be routed to the DDR channel that owns the
+selected lane.
 
 What `argon2_cl` does (see `fpga/f1/host/argon2_cl.c`):
 
@@ -117,9 +120,9 @@ What `argon2_cl` does (see `fpga/f1/host/argon2_cl.c`):
   +0x14 BASE_HI     base[63:32]
 ```
 
-All four lanes share one `GLOBAL_START` pulse so a p=4 job begins in lockstep. The per-lane `sync_req` / `sync_ack` barrier is AND-joined in `cl_argon2_core` (`sync_ack = {4{&sync_req}}`) — exactly the `argon2_fill_job` barrier — so slices stay aligned without host intervention.
+All four independent lanes share one `GLOBAL_START` pulse. The CL also contains the p4 slice barrier used by the shared-memory functional harness, but that mode is disabled until cross-channel reference reads are routed correctly.
 
-4. Poll `STATUS` until `done == 0xF` (independent mode) or `done == 0xF` in p4_mode (all four lanes finish their slice at the same time).
+4. Poll `STATUS` until `done == 0xF` in independent mode.
 5. DMA the final working set back and `memcmp` against `*_exp.hex`.
 
 ### 4b. Four independent p=1 jobs (the scaling proof)
@@ -139,29 +142,26 @@ poll STATUS until done == 0xF
 
 This is exactly `sim/tb_cl_argon2.sv` — four copies of the 8 KiB argon2i KAT (`password`/`somesalt` / t=2 / m=8) running in parallel, each checked against `gen/fill_i_exp.hex`. On hardware each lane should return the same PASS and the measured cand/s should be ~4× one lane (no sharing).
 
-### 4c. One p=4 job across four channels
+### 4c. One p=4 job across four channels (deferred)
 
-Set `CONTROL[0] = 1` (p4_mode). Now core *L* walks lane *L* of the same job:
+Do not set `CONTROL[0]` on hardware yet. Core L writes lane L locally, but a
+reference selected by Argon2 may belong to any lane. The current CL sends
+that global block address to core L's local DDR port, which reads the wrong
+physical channel whenever `ref_lane != L`. The shared-memory RFC bench does
+not expose this partitioning error.
 
-```
-CONTROL = 0x01
-for L in 0..3:
-  LANE_CTRL[L] = type_i | (4 << 8)   // lanes=4 (informational)
-  PASSES[L]    = 3
-  LANE_LENGTH[L] = 8                 // q = m'/p = 32/4
-  MEMORY_BLKS[L] = 32                // m' = 32
-  BASE_LO/HI[L]  = shared_base       // all four point into the same job's regions
-write GLOBAL_START
-poll STATUS
-```
-
-Only the slice barrier crosses channels — one bit per lane, AND-joined. No data crosses channels. This is the thesis in `README.md`: **N independent ports = N full-rate instances**, and a single p=4 job is just four cooperating instances.
+The required next block is a 4×4 read crossbar: decode the owner lane from
+`ref_idx / lane_length`, arbitrate requests at each DDR channel, tag the
+requesting core, and route each returning 16-beat block back to that core.
+Writes remain local, and the existing slice barrier remains valid. Re-enable
+`--p4` only after the RFC p=4 KAT passes through a simulation model with four
+truly separate memories.
 
 ### Host driver notes
 
-* The CL only drives the DDR AXI ports. The working set must be DMAd into each channel's region beforehand and DMAd back afterward (via `sh_cl_dma_pcis`, exposed as `fpga_pci_mem_write/read` in the SDK). The skeleton in `argon2_cl.c` documents the TODO; the fleshed driver in this repo implements it with `fpga_pci_attach` + `fpga_pci_poke/peek` for OCL and `fpga_pci_dma_write/read` for the DDR preload.
+* The CL only drives the DDR AXI ports. The working set must be DMAd into each channel's region beforehand and DMAd back afterward. The host driver in `argon2_cl.c` programs OCL with `fpga_pci_poke/peek` and uses `fpga_pci_dma_write/read` for preload/readback. Confirm its BAR and channel mapping against the exact AWS HDK release used for the build; a CL-owned PCIS data mover is not included.
 * `BASE` is a byte address on the DDR AXI (64-bit). For contiguous per-channel regions use `base[L] = base0 + L * m' * 1024`.
-* If you see `STATUS` stuck at `busy != 0, done == 0`, the slice barrier is deadlocked — usually `p4_mode` mismatched between lanes or one lane's `q` / `m'` typoed so it waits forever at `SLICE_SYNC`.
+* If `STATUS` is stuck at `busy != 0, done == 0` in supported p=1 mode, inspect the lane parameters and AXI response path. Do not use p4 mode until the cross-channel read router is implemented.
 * Interrupts (`cl_sh_app_irq`) are not yet wired — polling `STATUS` is the bring-up path.
 
 ## 5. Building the CL bitstream
@@ -197,7 +197,7 @@ The DCP → AFI flow (`create_fpga_image`, `fpga-load-local-image`) is the stand
 Once 3a-3c PASS on the RFC vectors, scale to a bandwidth-sized job and measure:
 
 * **1 GiB / t=4 / p=1** — the README's reference: ~4 M compresses, ~4 GB random refs. Time one `GLOBAL_START` → `done` and compute `cand/s = 1 / wall_seconds` per channel. Expect ≈ 1-1.2 cand/s per DDR channel at 200 MHz (≈ 1.25 M G/s, ~1.2 GiB/s random) — four channels ≈ 4-5 cand/s.
-* **4× 1 GiB p=1 vs. 1× 4 GiB p=4** — should be the same aggregate cand/s (partitioned ports don't care). If p=4 is slower, the slice barrier or the shared `base` is wrong.
+* **Four simultaneous 1 GiB p=1 jobs** — aggregate cand/s should be about 4× one channel. Measure p=4 only after the owner-channel read crossbar is implemented; its arbitration cost then becomes a separate result.
 * **Burst counters** — add an AXI performance counter on `awlen==15` / `arlen==15` bursts per channel if you want to confirm 512-bit 16-beat is actually issuing.
 
 These numbers are the gate for the next hardware (Alveo U50, 32 HBM pseudo-channels): the same `cl_argon2_core` with `NUM_DDR=32` and one `argon2_fill_axi` per pseudo-channel.
@@ -207,7 +207,7 @@ These numbers are the gate for the next hardware (Alveo U50, 32 HBM pseudo-chann
 | Symptom | Likely cause |
 |---------|--------------|
 | Icarus build fails with `unknown module type argon2_fill_axi` | Missing `rtl/` on the include path — add `-I../../rtl/include -I design` and `-f filelist.f` |
-| `STATUS` never reaches `done==0xF` | `p4_mode` bit mismatched; or `LANE_LENGTH` / `MEMORY_BLKS` typoed so one lane waits at `SLICE_SYNC` forever |
+| `STATUS` never reaches `done==0xF` | Invalid lane parameters or a stalled AXI response; p4 mode is not currently supported on partitioned DDR |
 | `done` asserts but data mismatch on beat 0 / 15 | Old `argon2_fill_ctrl` handshake bug (word 0 twice / word 15 never) — already fixed by driving `c_in_*` combinationally from `state`/`beat` |
 | 4-channel BW ≈ 1-channel BW | Shared SODIMM or a single AXI interconnect — re-check `cl_sh_ddr_areset_n` and that each `DDR_AXI_*` channel slice is wired to a distinct `sh_ddr` port |
 | OCL writes silently ignored | `awaddr` word vs. byte confusion — OCL BAR is byte-addressed, so word k is at byte `k*4`; lane L base is `(16 + L*8)*4 = 0x40 + 0x20*L` |

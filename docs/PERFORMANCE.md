@@ -146,19 +146,21 @@ serial P→drain chain and AXI write handshakes.
 * **Deeper P retiming** (the 2-wave × ~9-cycle P chain is the hard
   floor; 16 P units instead of 8 does not help — the column wave reads
   the row wave's output).
-* 4× p=1 vs 1× p=4 cross-check once on hardware (they should match; the
-  slice barrier is the only shared structure). The p=4 barrier is
-  exercised functionally by `tb_cl_argon2` / RFC bench but not yet timed
-  against the DDR4 model — need a p=4 perf bench.
+* **Partitioned-memory p=4 routing:** Argon2 references blocks in other
+  lanes, so banking one lane per channel needs an owner-channel read crossbar
+  and tagged return path; the slice barrier alone is insufficient. The RFC
+  p=4 bench currently uses a shared simulation RAM and does not model this.
+  Build the router and a four-memory p=4 perf bench before any hardware
+  4×p=1 versus 1×p=4 comparison.
 
 ## Model caveats
 
 * The DDR4 model is single-command-per-cycle with realistic latencies
   but no bank-group/tCCD modeling; at 12.8 GB/s AXI vs 19.2 GB/s DRAM the
   bus is the slower side, so this is faithful for this core's traffic.
-* p=1 lanes don't interact; the 4-lane number is 4× per-lane. The p=4
-  slice barrier is exercised functionally by `tb_cl_argon2` / the RFC
-  bench but not yet timed against the DDR4 model.
+* p=1 lanes don't interact; the 4-lane number is 4× per-lane. The p=4 RFC
+  bench uses shared memory and verifies fill/index/barrier behavior, not the
+  cross-channel routing required by four physically separate DDRs.
 * Verilator 5.4x (pip wheel) is the reference simulator for these
   numbers; the bench also builds under Icarus (`make -C sim perf`).
 * Write FIFO RAW handling stalls on hit; hit rate is ~1/lane_length, so

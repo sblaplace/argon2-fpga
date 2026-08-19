@@ -29,13 +29,14 @@ shell's `DDRx_AXI` ports / `axi_bus_t` members.
 
 * **p4_mode = 0** — four independent p=1 jobs. Each channel runs its own
   candidate against its own private DDR region (`lane_id = 0`).
-* **p4_mode = 1** — one p=4 job spread across the four channels. Core *L*
-  walks lane *L* of the same job; the four slice barriers are AND-joined,
-  exactly the `argon2_fill_job` barrier in `rtl/argon2/`. This is the
-  partitioned-bandwidth design the whole project is built around.
+* **p4_mode = 1 is not hardware-ready** — the slice barriers are AND-joined,
+  but Argon2 can reference blocks in another lane. The shared-RAM
+  `argon2_fill_job` bench naturally permits those reads; four physically
+  separate DDR ports need an owner-channel read crossbar and response tags.
+  Until that router exists, the host rejects `--p4` and only independent
+  p=1 mode is supported on F1.
 
-All four cores share one `start` pulse (a write to `GLOBAL_START`) so a
-p=4 job begins in lockstep.
+All four cores share one `start` pulse (a write to `GLOBAL_START`).
 
 ## OCL register map (byte addresses, 32-bit words)
 
@@ -100,15 +101,16 @@ Per `docs/ARCHITECTURE.md` step 3, bring it up in this order:
    port and run `cl_dram_dma`-style traffic to confirm each channel hits
    its isolated bandwidth. The 16-beat / 512-bit bursts in `argon2_axi_mm`
    are sized for exactly this.
-3. **Full job on one port**, then **p=4 across all four**.
+3. **Full p=1 job on one port**, then **four independent p=1 jobs**.
+   Add and verify the cross-channel read router before attempting p=4.
 
 ## Not yet done (stubs / TODO)
 
-* PCIS / host DMA path (`sh_cl_dma_pcis`) — currently the working set is
-  assumed pre-loaded into each channel's region via the existing DMA; the
-  CL only drives the DRAM AXI ports. (The host driver skeleton in
-  `host/argon2_cl.c` documents the OCL programming; the DMA transfer is
-  left as a TODO there.)
+* A CL-owned PCIS data mover is not included. The CL drives the DRAM AXI
+  ports, while `host/argon2_cl.c` uses the AWS SDK DMA API to preload and
+  read back each DDR region before and after a job. This polling/DMA path is
+  sufficient for bring-up but should be validated against the selected HDK
+  release's BAR/channel mapping.
 * Interrupt / `cl_sh_app_irq` to signal `done` to the host (polling
   STATUS works for bring-up).
 

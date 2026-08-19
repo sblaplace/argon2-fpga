@@ -28,32 +28,40 @@ Current RTL (`argon2_compress`):
 
 - 512-bit streaming ports (16 beats / block) — matches HBM AXI and is a
   clean multiple of a 64-bit DDR beat.
-- **One** `argon2_p` reused 16 times. Each P is 4-stage GB × 2 phases ≈ 9
-  cycles. Compute ≈ 160 cycles / G.
-- 4 parallel GB units inside P (the column/diagonal groups have no
+- `N_P` parallel `argon2_p` units, restricted to 1, 2, 4, or 8. Each P is
+  4-stage GB × 2 phases ≈ 9 cycles. Rows run first, then columns; the two
+  phases cannot share a wave because every column consumes the row result.
+- 4 parallel GB units inside each P (the column/diagonal groups have no
   internal dependence).
+- The measured performance point is **N_P=8**: two P waves, about 18 P
+  cycles and 67.9 total cycles per block against the DDR model. N_P=1 is
+  the small-area default and takes about 160 P cycles.
 
 ### Why not fully unroll
 
 A fully parallel G is 16 P × 8 GB × 4 × (32×32) ≈ 512 multiplies.
 UltraScale+ wants ~4 DSP48E2 per 32×32 unsigned, so ~2k DSP / core.
-VU9P has 6840 — it *fits*, and would issue well under one G / cycle, but
-a single DDR4 channel cannot feed that. The first core is sized to be
-**just faster than one channel**, then replicated per port.
+VU9P has 6840 — it may fit one such core, but not four channel-local cores,
+and rows must still complete before columns. `N_P=8` exposes all useful
+parallelism within each phase while remaining replicable across four DDR
+ports.
 
-Rough budget for the 4-GB / 9-cycle P:
+Rough pre-synthesis budget (timing and utilization still need confirmation
+from the F1 build):
 
-| Resource | Estimate / core |
-|----------|-----------------|
-| DSP48    | 4 GB × ~4 DSP × 1 (reused) ≈ 16–32 |
-| LUT      | add/xor/rotate + 2 KiB of block state |
-| BRAM     | 0 if the 128-word file is registers; 2×36k if moved to BRAM |
-| Cycles/G | ~160 compute + mem |
+| Resource | N_P=1 / core | N_P=8 / core |
+|----------|--------------|--------------|
+| DSP48    | ~16–32 | ~128–256 |
+| LUT      | add/xor/rotate + block state | roughly 8× P logic + block state |
+| BRAM     | 0 if the 128-word file is registers; more if mapped to RAM | same storage order |
+| P cycles/G | ~160 | ~18 |
+| Measured total cycles/block | ~249 DDR4 | ~67.9 DDR4 |
 
-At 200 MHz that is ~1.25 M G/s, i.e. enough to push ~1.2 GiB/s of
-*random* 1 KiB reads — in the same ballpark as a well-behaved DDR4
-channel doing 1 KiB random. The next knob is a second P (rows and
-columns overlap poorly, but two inflight G's hide read latency).
+At 200 MHz, N_P=8 measures 0.937 candidate/s per lane for the 1 GiB,
+t=3 Argon2i projection, within about 9% of its ideal-memory compute floor.
+See [`PERFORMANCE.md`](PERFORMANCE.md) for the complete sweep and model
+caveats. The next compute experiment is compress double-buffering; real F1
+timing closure and DDR measurements should come first.
 
 ## Indexing
 
@@ -98,9 +106,16 @@ the random-ref term.
 
 AWS F1 (`f1.2xlarge`, VU9P) exposes **4 independent DDR4 channels**
 through the HDK (`cl_dram_dma` / AXI-MM, typically 512-bit). The v1
-integration is four copies of `argon2_fill_axi`, one per `sh_ddr`
-port. Cross-channel traffic is only the 1-bit slice barrier when a
-single job uses p > 1.
+integration is four copies of `argon2_fill_axi`, one per `sh_ddr` port,
+and supports four independent p=1 jobs without shared data traffic.
+
+A single p>1 job is different: Argon2 may select a reference block from
+another lane. Banking lane L in channel L therefore requires a read crossbar
+that routes each request to the reference lane's owner channel and returns
+its tagged response. The slice barrier is necessary but not sufficient.
+`argon2_fill_job` is functionally verified against a shared simulation RAM;
+the current F1 CL has the barrier but not this cross-channel read router, so
+its p4 mode must remain disabled on hardware.
 
 Alveo U50 is the same picture with 32 HBM pseudo-channels.
 
@@ -126,7 +141,7 @@ G so address generation of the next window can later overlap a fill.
 | `argon2_fill_job` | p lanes + AND barrier at each slice |
 | `argon2_addr_gen` (argon2i PRNG) | Two G's in counter mode, 128 J1∥J2 / window |
 | `argon2_axi_mm` / `argon2_fill_axi` | 512-bit AXI4-MM, 16-beat / 1 KiB block, independent R/W |
-| F1 `cl_dram_dma` / `sh_ddr` shell | Scaffold: `fpga/f1/` (`cl_argon2` top + OCL + sync) |
+| F1 `cl_dram_dma` / `sh_ddr` shell | Scaffold: four independent p=1 channels; p4 barrier present, cross-channel reference router missing |
 | Python golden model + RFC 9106 §5 | Passing |
 | Benches + CI (Icarus **and** Verilator) | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill, RFC 32 KiB / p=4, AXI-MM — all passing |
 
