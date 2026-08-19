@@ -3,7 +3,9 @@
 `timescale 1ns / 1ps
 `include "blake2b_pkg.svh"
 
-module tb_blake2b_g;
+module tb_blake2b_g #(
+    parameter int N_P = 1   // unused: uniform -GN_P sweep across benches
+);
     logic [63:0] a, b, c, d, x, y;
     logic [63:0] ao, bo, co, d_o;
 

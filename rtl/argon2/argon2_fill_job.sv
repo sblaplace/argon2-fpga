@@ -11,7 +11,8 @@
 
 module argon2_fill_job #(
     parameter int ADDR_W = 32,
-    parameter int LANES  = 4
+    parameter int LANES  = 4,
+    parameter int N_P    = 1   // parallel P units in the compression G
 ) (
     input  logic clk,
     input  logic rst_n,
@@ -67,7 +68,7 @@ module argon2_fill_job #(
     genvar gi;
     generate
         for (gi = 0; gi < LANES; gi++) begin : lane
-            argon2_fill_ctrl #(.ADDR_W(ADDR_W)) u_fill (
+            argon2_fill_ctrl #(.ADDR_W(ADDR_W), .N_P(N_P)) u_fill (
                 .clk           (clk),
                 .rst_n         (rst_n),
                 .start         (start),

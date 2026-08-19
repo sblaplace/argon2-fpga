@@ -13,9 +13,9 @@
 
 `timescale 1ns / 1ps
 
-`include "cl_argon2_axi_if.sv"
-
-module tb_cl_argon2;
+module tb_cl_argon2 #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     localparam int NUM_DDR = 4;
     localparam int NBLK   = 8;
     localparam int NBEAT  = 16;
@@ -68,11 +68,24 @@ module tb_cl_argon2;
     logic [7:0]  sh_cl_ddr_stat_addr;
     wire  [3:0]  cl_sh_ddr_areset_n;
 
-    // ---- four DDR AXI4 master buses ------------------------------------
-    axi_bus_t ddr0 (), ddr1 (), ddr2 (), ddr3 ();
+    // ---- four DDR AXI4 master buses (flat, channel n = bit n) ---------
+    logic [NUM_DDR-1:0]        ddr_awvalid, ddr_awready, ddr_wvalid, ddr_wlast, ddr_wready;
+    logic [NUM_DDR-1:0]        ddr_bready, ddr_bvalid, ddr_arvalid, ddr_arready;
+    logic [NUM_DDR-1:0]        ddr_rvalid, ddr_rlast, ddr_rready;
+    logic [NUM_DDR-1:0][ADDR_W-1:0]  ddr_awaddr, ddr_araddr;
+    logic [NUM_DDR-1:0][DATA_W-1:0]  ddr_wdata, ddr_rdata;
+    logic [NUM_DDR-1:0][7:0]   ddr_awlen, ddr_arlen;
+    logic [NUM_DDR-1:0][2:0]   ddr_awsize, ddr_arsize;
+    logic [NUM_DDR-1:0][1:0]   ddr_awburst, ddr_arburst;
+    logic [NUM_DDR-1:0]        ddr_awlock, ddr_arlock;
+    logic [NUM_DDR-1:0][3:0]   ddr_awcache, ddr_arcache, ddr_awqos, ddr_arqos;
+    logic [NUM_DDR-1:0][2:0]   ddr_awprot, ddr_arprot;
+    logic [NUM_DDR-1:0][ID_W-1:0] ddr_awid, ddr_arid, ddr_bid, ddr_rid;
+    logic [NUM_DDR-1:0][1:0]   ddr_bresp, ddr_rresp;
+    logic [NUM_DDR-1:0][DATA_W/8-1:0] ddr_wstrb;
 
     // ---- DUT ------------------------------------------------------------
-    cl_argon2 dut (
+    cl_argon2 #(.N_P(N_P)) dut (
         .clk_main_a0      (clk),
         .rst_main_n       (rst_main_n),
         .sh_cl_flr_assert (sh_cl_flr_assert),
@@ -85,7 +98,26 @@ module tb_cl_argon2;
         .sh_cl_ddr_stat_cs  (sh_cl_ddr_stat_cs),
         .sh_cl_ddr_stat_addr(sh_cl_ddr_stat_addr),
         .cl_sh_ddr_areset_n(cl_sh_ddr_areset_n),
-        .DDR0_AXI(ddr0), .DDR1_AXI(ddr1), .DDR2_AXI(ddr2), .DDR3_AXI(ddr3),
+        .DDR_AXI_awvalid(ddr_awvalid), .DDR_AXI_awaddr(ddr_awaddr),
+        .DDR_AXI_awlen(ddr_awlen), .DDR_AXI_awsize(ddr_awsize),
+        .DDR_AXI_awburst(ddr_awburst), .DDR_AXI_awlock(ddr_awlock),
+        .DDR_AXI_awcache(ddr_awcache), .DDR_AXI_awprot(ddr_awprot),
+        .DDR_AXI_awqos(ddr_awqos), .DDR_AXI_awid(ddr_awid),
+        .DDR_AXI_wdata(ddr_wdata), .DDR_AXI_wstrb(ddr_wstrb),
+        .DDR_AXI_wlast(ddr_wlast), .DDR_AXI_wvalid(ddr_wvalid),
+        .DDR_AXI_bready(ddr_bready),
+        .DDR_AXI_araddr(ddr_araddr), .DDR_AXI_arlen(ddr_arlen),
+        .DDR_AXI_arsize(ddr_arsize), .DDR_AXI_arburst(ddr_arburst),
+        .DDR_AXI_arlock(ddr_arlock), .DDR_AXI_arcache(ddr_arcache),
+        .DDR_AXI_arprot(ddr_arprot), .DDR_AXI_arqos(ddr_arqos),
+        .DDR_AXI_arid(ddr_arid), .DDR_AXI_arvalid(ddr_arvalid),
+        .DDR_AXI_rready(ddr_rready),
+        .DDR_AXI_awready(ddr_awready), .DDR_AXI_wready(ddr_wready),
+        .DDR_AXI_bvalid(ddr_bvalid), .DDR_AXI_bid(ddr_bid),
+        .DDR_AXI_bresp(ddr_bresp), .DDR_AXI_arready(ddr_arready),
+        .DDR_AXI_rvalid(ddr_rvalid), .DDR_AXI_rid(ddr_rid),
+        .DDR_AXI_rdata(ddr_rdata), .DDR_AXI_rresp(ddr_rresp),
+        .DDR_AXI_rlast(ddr_rlast),
         .sh_ocl_awvalid(sh_ocl_awvalid), .sh_ocl_awaddr(sh_ocl_awaddr),
         .sh_ocl_awid   (sh_ocl_awid),
         .sh_ocl_wvalid (sh_ocl_wvalid),  .sh_ocl_wdata (sh_ocl_wdata),
@@ -105,81 +137,86 @@ module tb_cl_argon2;
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
                  .NBLK(NBLK), .RD_LAT(12)) ram0 (
         .clk(clk), .rst_n(rst_n),
-        .s_axi_awid(ddr0.awid), .s_axi_awaddr(ddr0.awaddr), .s_axi_awlen(ddr0.awlen),
-        .s_axi_awsize(ddr0.awsize), .s_axi_awvalid(ddr0.awvalid), .s_axi_awready(ddr0.awready),
-        .s_axi_wdata(ddr0.wdata), .s_axi_wstrb(ddr0.wstrb), .s_axi_wlast(ddr0.wlast),
-        .s_axi_wvalid(ddr0.wvalid), .s_axi_wready(ddr0.wready),
-        .s_axi_bid(ddr0.bid), .s_axi_bresp(ddr0.bresp), .s_axi_bvalid(ddr0.bvalid), .s_axi_bready(ddr0.bready),
-        .s_axi_arid(ddr0.arid), .s_axi_araddr(ddr0.araddr), .s_axi_arlen(ddr0.arlen),
-        .s_axi_arvalid(ddr0.arvalid), .s_axi_arready(ddr0.arready),
-        .s_axi_rid(ddr0.rid), .s_axi_rdata(ddr0.rdata), .s_axi_rresp(ddr0.rresp),
-        .s_axi_rlast(ddr0.rlast), .s_axi_rvalid(ddr0.rvalid), .s_axi_rready(ddr0.rready)
+        .s_axi_awid(ddr_awid[0]), .s_axi_awaddr(ddr_awaddr[0]), .s_axi_awlen(ddr_awlen[0]),
+        .s_axi_awsize(ddr_awsize[0]), .s_axi_awvalid(ddr_awvalid[0]), .s_axi_awready(ddr_awready[0]),
+        .s_axi_wdata(ddr_wdata[0]), .s_axi_wstrb(ddr_wstrb[0]), .s_axi_wlast(ddr_wlast[0]),
+        .s_axi_wvalid(ddr_wvalid[0]), .s_axi_wready(ddr_wready[0]),
+        .s_axi_bid(ddr_bid[0]), .s_axi_bresp(ddr_bresp[0]), .s_axi_bvalid(ddr_bvalid[0]), .s_axi_bready(ddr_bready[0]),
+        .s_axi_arid(ddr_arid[0]), .s_axi_araddr(ddr_araddr[0]), .s_axi_arlen(ddr_arlen[0]),
+        .s_axi_arvalid(ddr_arvalid[0]), .s_axi_arready(ddr_arready[0]),
+        .s_axi_rid(ddr_rid[0]), .s_axi_rdata(ddr_rdata[0]), .s_axi_rresp(ddr_rresp[0]),
+        .s_axi_rlast(ddr_rlast[0]), .s_axi_rvalid(ddr_rvalid[0]), .s_axi_rready(ddr_rready[0])
     );
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
                  .NBLK(NBLK), .RD_LAT(12)) ram1 (
         .clk(clk), .rst_n(rst_n),
-        .s_axi_awid(ddr1.awid), .s_axi_awaddr(ddr1.awaddr), .s_axi_awlen(ddr1.awlen),
-        .s_axi_awsize(ddr1.awsize), .s_axi_awvalid(ddr1.awvalid), .s_axi_awready(ddr1.awready),
-        .s_axi_wdata(ddr1.wdata), .s_axi_wstrb(ddr1.wstrb), .s_axi_wlast(ddr1.wlast),
-        .s_axi_wvalid(ddr1.wvalid), .s_axi_wready(ddr1.wready),
-        .s_axi_bid(ddr1.bid), .s_axi_bresp(ddr1.bresp), .s_axi_bvalid(ddr1.bvalid), .s_axi_bready(ddr1.bready),
-        .s_axi_arid(ddr1.arid), .s_axi_araddr(ddr1.araddr), .s_axi_arlen(ddr1.arlen),
-        .s_axi_arvalid(ddr1.arvalid), .s_axi_arready(ddr1.arready),
-        .s_axi_rid(ddr1.rid), .s_axi_rdata(ddr1.rdata), .s_axi_rresp(ddr1.rresp),
-        .s_axi_rlast(ddr1.rlast), .s_axi_rvalid(ddr1.rvalid), .s_axi_rready(ddr1.rready)
+        .s_axi_awid(ddr_awid[1]), .s_axi_awaddr(ddr_awaddr[1]), .s_axi_awlen(ddr_awlen[1]),
+        .s_axi_awsize(ddr_awsize[1]), .s_axi_awvalid(ddr_awvalid[1]), .s_axi_awready(ddr_awready[1]),
+        .s_axi_wdata(ddr_wdata[1]), .s_axi_wstrb(ddr_wstrb[1]), .s_axi_wlast(ddr_wlast[1]),
+        .s_axi_wvalid(ddr_wvalid[1]), .s_axi_wready(ddr_wready[1]),
+        .s_axi_bid(ddr_bid[1]), .s_axi_bresp(ddr_bresp[1]), .s_axi_bvalid(ddr_bvalid[1]), .s_axi_bready(ddr_bready[1]),
+        .s_axi_arid(ddr_arid[1]), .s_axi_araddr(ddr_araddr[1]), .s_axi_arlen(ddr_arlen[1]),
+        .s_axi_arvalid(ddr_arvalid[1]), .s_axi_arready(ddr_arready[1]),
+        .s_axi_rid(ddr_rid[1]), .s_axi_rdata(ddr_rdata[1]), .s_axi_rresp(ddr_rresp[1]),
+        .s_axi_rlast(ddr_rlast[1]), .s_axi_rvalid(ddr_rvalid[1]), .s_axi_rready(ddr_rready[1])
     );
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
                  .NBLK(NBLK), .RD_LAT(12)) ram2 (
         .clk(clk), .rst_n(rst_n),
-        .s_axi_awid(ddr2.awid), .s_axi_awaddr(ddr2.awaddr), .s_axi_awlen(ddr2.awlen),
-        .s_axi_awsize(ddr2.awsize), .s_axi_awvalid(ddr2.awvalid), .s_axi_awready(ddr2.awready),
-        .s_axi_wdata(ddr2.wdata), .s_axi_wstrb(ddr2.wstrb), .s_axi_wlast(ddr2.wlast),
-        .s_axi_wvalid(ddr2.wvalid), .s_axi_wready(ddr2.wready),
-        .s_axi_bid(ddr2.bid), .s_axi_bresp(ddr2.bresp), .s_axi_bvalid(ddr2.bvalid), .s_axi_bready(ddr2.bready),
-        .s_axi_arid(ddr2.arid), .s_axi_araddr(ddr2.araddr), .s_axi_arlen(ddr2.arlen),
-        .s_axi_arvalid(ddr2.arvalid), .s_axi_arready(ddr2.arready),
-        .s_axi_rid(ddr2.rid), .s_axi_rdata(ddr2.rdata), .s_axi_rresp(ddr2.rresp),
-        .s_axi_rlast(ddr2.rlast), .s_axi_rvalid(ddr2.rvalid), .s_axi_rready(ddr2.rready)
+        .s_axi_awid(ddr_awid[2]), .s_axi_awaddr(ddr_awaddr[2]), .s_axi_awlen(ddr_awlen[2]),
+        .s_axi_awsize(ddr_awsize[2]), .s_axi_awvalid(ddr_awvalid[2]), .s_axi_awready(ddr_awready[2]),
+        .s_axi_wdata(ddr_wdata[2]), .s_axi_wstrb(ddr_wstrb[2]), .s_axi_wlast(ddr_wlast[2]),
+        .s_axi_wvalid(ddr_wvalid[2]), .s_axi_wready(ddr_wready[2]),
+        .s_axi_bid(ddr_bid[2]), .s_axi_bresp(ddr_bresp[2]), .s_axi_bvalid(ddr_bvalid[2]), .s_axi_bready(ddr_bready[2]),
+        .s_axi_arid(ddr_arid[2]), .s_axi_araddr(ddr_araddr[2]), .s_axi_arlen(ddr_arlen[2]),
+        .s_axi_arvalid(ddr_arvalid[2]), .s_axi_arready(ddr_arready[2]),
+        .s_axi_rid(ddr_rid[2]), .s_axi_rdata(ddr_rdata[2]), .s_axi_rresp(ddr_rresp[2]),
+        .s_axi_rlast(ddr_rlast[2]), .s_axi_rvalid(ddr_rvalid[2]), .s_axi_rready(ddr_rready[2])
     );
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
                  .NBLK(NBLK), .RD_LAT(12)) ram3 (
         .clk(clk), .rst_n(rst_n),
-        .s_axi_awid(ddr3.awid), .s_axi_awaddr(ddr3.awaddr), .s_axi_awlen(ddr3.awlen),
-        .s_axi_awsize(ddr3.awsize), .s_axi_awvalid(ddr3.awvalid), .s_axi_awready(ddr3.awready),
-        .s_axi_wdata(ddr3.wdata), .s_axi_wstrb(ddr3.wstrb), .s_axi_wlast(ddr3.wlast),
-        .s_axi_wvalid(ddr3.wvalid), .s_axi_wready(ddr3.wready),
-        .s_axi_bid(ddr3.bid), .s_axi_bresp(ddr3.bresp), .s_axi_bvalid(ddr3.bvalid), .s_axi_bready(ddr3.bready),
-        .s_axi_arid(ddr3.arid), .s_axi_araddr(ddr3.araddr), .s_axi_arlen(ddr3.arlen),
-        .s_axi_arvalid(ddr3.arvalid), .s_axi_arready(ddr3.arready),
-        .s_axi_rid(ddr3.rid), .s_axi_rdata(ddr3.rdata), .s_axi_rresp(ddr3.rresp),
-        .s_axi_rlast(ddr3.rlast), .s_axi_rvalid(ddr3.rvalid), .s_axi_rready(ddr3.rready)
+        .s_axi_awid(ddr_awid[3]), .s_axi_awaddr(ddr_awaddr[3]), .s_axi_awlen(ddr_awlen[3]),
+        .s_axi_awsize(ddr_awsize[3]), .s_axi_awvalid(ddr_awvalid[3]), .s_axi_awready(ddr_awready[3]),
+        .s_axi_wdata(ddr_wdata[3]), .s_axi_wstrb(ddr_wstrb[3]), .s_axi_wlast(ddr_wlast[3]),
+        .s_axi_wvalid(ddr_wvalid[3]), .s_axi_wready(ddr_wready[3]),
+        .s_axi_bid(ddr_bid[3]), .s_axi_bresp(ddr_bresp[3]), .s_axi_bvalid(ddr_bvalid[3]), .s_axi_bready(ddr_bready[3]),
+        .s_axi_arid(ddr_arid[3]), .s_axi_araddr(ddr_araddr[3]), .s_axi_arlen(ddr_arlen[3]),
+        .s_axi_arvalid(ddr_arvalid[3]), .s_axi_arready(ddr_arready[3]),
+        .s_axi_rid(ddr_rid[3]), .s_axi_rdata(ddr_rdata[3]), .s_axi_rresp(ddr_rresp[3]),
+        .s_axi_rlast(ddr_rlast[3]), .s_axi_rvalid(ddr_rvalid[3]), .s_axi_rready(ddr_rready[3])
     );
 
     // ---- OCL BFM --------------------------------------------------------
+    // Drives and samples on the NEGEDGE: changing stimulus in the same
+    // active region as the DUT's posedge sampling is a simulator-order
+    // race (Verilator happened to win it; some vvp builds deadlocked on
+    // the aw/w handshake). Half a cycle away from both edges the
+    // handshakes are unambiguous in every simulator.
     task automatic ocl_write(input [31:0] addr, input [31:0] data);
         fork
             begin
                 sh_ocl_awvalid = 1'b1; sh_ocl_awaddr = addr; sh_ocl_awid = 16'd0;
-                while (!(sh_ocl_awvalid && sh_ocl_awready)) @(posedge clk);
-                @(posedge clk); sh_ocl_awvalid = 1'b0;
+                while (!(sh_ocl_awvalid && sh_ocl_awready)) @(negedge clk);
+                @(negedge clk); sh_ocl_awvalid = 1'b0;
             end
             begin
-                sh_ocl_wvalid = 1'b1; sh_ocl_wdata = data; sh_ocl_wstrb = 16'h000F;
-                while (!(sh_ocl_wvalid && sh_ocl_wready)) @(posedge clk);
-                @(posedge clk); sh_ocl_wvalid = 1'b0;
+                sh_ocl_wvalid = 1'b1; sh_ocl_wdata = data; sh_ocl_wstrb = 16'hFFFF;
+                while (!(sh_ocl_wvalid && sh_ocl_wready)) @(negedge clk);
+                @(negedge clk); sh_ocl_wvalid = 1'b0;
             end
         join
-        while (!sh_ocl_bvalid) @(posedge clk);
-        sh_ocl_bready = 1'b1; @(posedge clk); sh_ocl_bready = 1'b0;
+        while (!sh_ocl_bvalid) @(negedge clk);
+        sh_ocl_bready = 1'b1; @(negedge clk); sh_ocl_bready = 1'b0;
     endtask
 
     task automatic ocl_read(input [31:0] addr, output [31:0] data);
         sh_ocl_arvalid = 1'b1; sh_ocl_araddr = addr; sh_ocl_arid = 16'd0;
-        while (!(sh_ocl_arvalid && sh_ocl_arready)) @(posedge clk);
-        @(posedge clk); sh_ocl_arvalid = 1'b0;
-        while (!sh_ocl_rvalid) @(posedge clk);
+        while (!(sh_ocl_arvalid && sh_ocl_arready)) @(negedge clk);
+        @(negedge clk); sh_ocl_arvalid = 1'b0;
+        while (!sh_ocl_rvalid) @(negedge clk);
         data = sh_ocl_rdata;
-        sh_ocl_rready = 1'b1; @(posedge clk); sh_ocl_rready = 1'b0;
+        sh_ocl_rready = 1'b1; @(negedge clk); sh_ocl_rready = 1'b0;
     endtask
 
     // ---- test -----------------------------------------------------------
@@ -189,16 +226,31 @@ module tb_cl_argon2;
     logic [31:0] st;
     logic [3:0]  done;
 
-    task automatic check_ram(input [511:0] mem [0:NW-1], input string name);
+    // Icarus doesn't support unpacked-array task ports, so select the
+    // RAM by channel number and read words through this helper.
+    function automatic logic [511:0] ram_word(input integer ch, input integer idx);
+        case (ch)
+            0: ram_word = ram0.mem[idx];
+            1: ram_word = ram1.mem[idx];
+            2: ram_word = ram2.mem[idx];
+            3: ram_word = ram3.mem[idx];
+            default: ram_word = 512'd0;
+        endcase
+    endfunction
+
+    task automatic check_ram(input integer ch, input string name);
         int m;
+        logic [511:0] got;
         m = 0;
-        for (int i = 0; i < NW; i = i + 1)
-            if (mem[i] !== exp[i]) begin
+        for (int i = 0; i < NW; i = i + 1) begin
+            got = ram_word(ch, i);
+            if (got !== exp[i]) begin
                 if (m < 4)
                     $display("FAIL %s beat %0d got %0128h exp %0128h",
-                             name, i, mem[i], exp[i]);
+                             name, i, got, exp[i]);
                 m = m + 1;
             end
+        end
         if (m != 0) begin
             $display("FAIL %s %0d beat(s) differ", name, m);
             errors = errors + 1;
@@ -243,10 +295,12 @@ module tb_cl_argon2;
 
         // Kick all lanes simultaneously.
         ocl_write(32'h00, 32'd1);
+        $display("[dbg] GLOBAL_START written");
 
-        // Poll STATUS until all four report done.
+        // Poll STATUS until all four report done. Any real run finishes in
+        // a few thousand polls; the cap just keeps a broken run fast.
         done = 4'b0; to = 0;
-        while (done != 4'b1111 && to < 2000000) begin
+        while (done != 4'b1111 && to < 20000) begin
             ocl_read(32'h08, st);
             done = st[7:4];
             to = to + 1;
@@ -254,15 +308,42 @@ module tb_cl_argon2;
 
         if (done != 4'b1111) begin
             $display("FAIL timeout (STATUS=0x%08h, polls=%0d)", st, to);
+            // Postmortem: read the lane config back through the OCL and
+            // peek at each lane's fill FSM state directly.
+`ifndef VERILATOR
+            // Icarus (like most tools) requires constant scope indices in
+            // hierarchical references, so unroll the four lanes.
+            for (int L = 0; L < NUM_DDR; L = L + 1) begin
+                logic [31:0] base;
+                logic [31:0] lc, ps, ll, mb;
+                logic [4:0]  fst;
+                base = 32'h40 + (32'(L) * 32'h20);
+                ocl_read(base + 32'h00, lc);
+                ocl_read(base + 32'h04, ps);
+                ocl_read(base + 32'h08, ll);
+                ocl_read(base + 32'h0C, mb);
+                case (L)
+                    0: fst = dut.u_core.lane[0].u_fill.state_o;
+                    1: fst = dut.u_core.lane[1].u_fill.state_o;
+                    2: fst = dut.u_core.lane[2].u_fill.state_o;
+                    3: fst = dut.u_core.lane[3].u_fill.state_o;
+                    default: fst = 5'd31;
+                endcase
+                $display("[dbg] lane%0d LANE_CTRL=%08h PASSES=%08h LEN=%08h BLKS=%08h state=%0d busy=%b done=%b",
+                         L, lc, ps, ll, mb, fst,
+                         dut.u_core.lane_busy[L],
+                         dut.u_core.lane_done[L]);
+            end
+`endif
             errors = errors + 1;
         end else begin
             $display("all four lanes done in %0d OCL polls", to);
         end
 
-        check_ram(ram0.mem, "lane0");
-        check_ram(ram1.mem, "lane1");
-        check_ram(ram2.mem, "lane2");
-        check_ram(ram3.mem, "lane3");
+        check_ram(0, "lane0");
+        check_ram(1, "lane1");
+        check_ram(2, "lane2");
+        check_ram(3, "lane3");
 
         if (errors == 0)
             $display("tb_cl_argon2: PASS");

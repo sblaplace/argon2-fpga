@@ -24,7 +24,10 @@
 
 `include "cl_argon2_defines.vh"
 
-module cl_argon2_core #(parameter int NUM_DDR = `A2_NUM_DDR) (
+module cl_argon2_core #(
+    parameter int NUM_DDR = `A2_NUM_DDR,
+    parameter int N_P    = 1   // parallel P units in the compression G
+) (
     input  logic clk,
     input  logic rst_n,           // active-low, already in the clk domain
 
@@ -105,9 +108,25 @@ module cl_argon2_core #(parameter int NUM_DDR = `A2_NUM_DDR) (
 
     assign status_sel = (NREG'(1) << `A2_OCL_STATUS);   // only STATUS is RO
 
+    // done is a single-cycle pulse from each fill core. Latch it until the
+    // next GLOBAL_START so a host polling over PCIe (or an OCL read loop,
+    // several cycles per poll) cannot miss a completed job.
+    logic [NUM_DDR-1:0] done_latch;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            done_latch <= '0;
+        end else if (start_pulse) begin
+            done_latch <= '0;
+        end else begin
+            done_latch <= done_latch | lane_done;
+        end
+    end
+
     always_comb begin
-        status_reg = '{default:32'd0};
-        status_reg[`A2_OCL_STATUS] = {24'd0, lane_done, lane_busy};
+        for (int k = 0; k < NREG; k = k + 1)
+            status_reg[k] = 32'd0;
+        status_reg[`A2_OCL_STATUS] = {24'd0, done_latch, lane_busy};
     end
 
     cl_argon2_ocl #(.NREG(NREG)) u_ocl (
@@ -175,7 +194,8 @@ module cl_argon2_core #(parameter int NUM_DDR = `A2_NUM_DDR) (
             argon2_fill_axi #(.AXI_ADDR_W(`A2_AXI_ADDR_W),
                               .AXI_ID_W(`A2_AXI_ID_W),
                               .AXI_DATA_W(`A2_AXI_DATA_W),
-                              .BLK_ADDR_W(`A2_BLK_ADDR_W)) u_fill (
+                              .BLK_ADDR_W(`A2_BLK_ADDR_W),
+                              .N_P(N_P)) u_fill (
                 .clk           (clk),
                 .rst_n         (core_rst_n),
                 .start         (start_pulse),

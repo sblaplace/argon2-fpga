@@ -12,7 +12,8 @@ module argon2_fill_axi #(
     parameter int AXI_ADDR_W = 64,
     parameter int AXI_ID_W   = 6,
     parameter int AXI_DATA_W = 512,
-    parameter int BLK_ADDR_W = 32
+    parameter int BLK_ADDR_W = 32,
+    parameter int N_P        = 1   // parallel P units in the compression G
 ) (
     input  logic                      clk,
     input  logic                      rst_n,
@@ -29,6 +30,8 @@ module argon2_fill_axi #(
     output logic                      sync_req,
     input  logic                      sync_ack,
     input  logic [AXI_ADDR_W-1:0]     base_addr,
+
+    output logic [4:0]                state_o,
 
     output logic [AXI_ID_W-1:0]       m_axi_awid,
     output logic [AXI_ADDR_W-1:0]     m_axi_awaddr,
@@ -77,7 +80,7 @@ module argon2_fill_axi #(
     logic [BLK_ADDR_W-1:0]     mem_rd_addr, mem_wr_addr;
     logic [AXI_DATA_W-1:0]     mem_rd_data, mem_wr_data;
 
-    argon2_fill_ctrl #(.ADDR_W(BLK_ADDR_W)) u_fill (
+    argon2_fill_ctrl #(.ADDR_W(BLK_ADDR_W), .N_P(N_P)) u_fill (
         .clk           (clk),
         .rst_n         (rst_n),
         .start         (start),
@@ -91,6 +94,7 @@ module argon2_fill_axi #(
         .type_i        (type_i),
         .sync_req      (sync_req),
         .sync_ack      (sync_ack),
+        .state_o       (state_o),
         .mem_rd_valid  (mem_rd_valid),
         .mem_rd_ready  (mem_rd_ready),
         .mem_rd_addr   (mem_rd_addr),

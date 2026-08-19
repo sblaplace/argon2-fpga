@@ -24,8 +24,14 @@ lint() {
     echo "iverilog not on PATH — skipping (Python KAT still valid: make test)"
   fi
   echo "== lint: verilator (if available) =="
-  if command -v verilator >/dev/null 2>&1; then
-    verilator --lint-only -I"$ROOT/rtl/include" -I"$F1/design" -f "$F1/filelist.f" "$F1/design/cl_argon2.sv" && echo "verilator: OK"
+  VLTOR="${VERILATOR:-}"
+  if [[ -z "$VLTOR" ]]; then
+    if command -v verilator >/dev/null 2>&1; then VLTOR=verilator
+    elif command -v verilator-cli >/dev/null 2>&1; then VLTOR=verilator-cli
+    fi
+  fi
+  if [[ -n "$VLTOR" ]]; then
+    $VLTOR --lint-only -I"$ROOT/rtl/include" -I"$F1/design" -f "$F1/filelist.f" "$F1/design/cl_argon2.sv" && echo "verilator: OK ($VLTOR)"
   else
     echo "verilator not on PATH — skipping"
   fi
@@ -35,10 +41,16 @@ sim() {
   echo "== vectors =="
   python3 -m tests.dump_vectors
   echo "== sim: make -C sim cl =="
+  VLTOR="${VERILATOR:-}"
+  if [[ -z "$VLTOR" ]]; then
+    if command -v verilator >/dev/null 2>&1; then VLTOR=verilator
+    elif command -v verilator-cli >/dev/null 2>&1; then VLTOR=verilator-cli
+    fi
+  fi
   if command -v iverilog >/dev/null 2>&1; then
     make -C "$ROOT/sim" cl
-  elif command -v verilator >/dev/null 2>&1; then
-    make -C "$ROOT/sim" SIM=verilator cl
+  elif [[ -n "$VLTOR" ]]; then
+    make -C "$ROOT/sim" SIM=verilator VERILATOR="$VLTOR" cl
   else
     echo "No simulator on PATH — install iverilog (yum/apt) or verilator"
     echo "Vectors are still dumped under sim/gen/ for host KAT."

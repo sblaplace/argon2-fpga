@@ -2,13 +2,15 @@
 // Argon2i address-generator KAT: first window of Z=(0,0,0,32,3,i).
 `timescale 1ns / 1ps
 
-module tb_argon2_addr_gen;
+module tb_argon2_addr_gen #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     logic        clk, rst_n, init, start, busy, done;
     logic [31:0] pass, lane, slice, memory_blocks, time_cost, type_i;
     logic [6:0]  rd_idx, rd_idx_b;
     logic [63:0] rd_j, rd_j_b;
 
-    argon2_addr_gen dut (
+    argon2_addr_gen #(.N_P(N_P)) dut (
         .clk(clk), .rst_n(rst_n),
         .init(init),
         .pass(pass), .lane(lane), .slice(slice),

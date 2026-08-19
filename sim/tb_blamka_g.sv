@@ -2,7 +2,9 @@
 // Self-checking bench for the 4-stage BlaMka pipeline.
 `timescale 1ns / 1ps
 
-module tb_blamka_g;
+module tb_blamka_g #(
+    parameter int N_P = 1   // unused: uniform -GN_P sweep across benches
+);
     logic        clk, rst_n, in_valid, out_valid;
     logic [63:0] a, b, c, d;
     logic [63:0] ao, bo, co, d_o;

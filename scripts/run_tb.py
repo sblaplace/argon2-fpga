@@ -2,112 +2,172 @@
 """
 run_tb.py — self-checking testbench runner.
 
-Discovers every hdl/**/tb_*.v, compiles it with Icarus Verilog, executes the
-simulation, and requires BOTH:
-  1. iverilog/vvp exit code 0 (no compile/runtime errors), AND
+Runs the real verification suites and requires BOTH:
+  1. the build exit code 0 (no compile/runtime errors), AND
   2. the literal marker "PASS" in the simulation output.
 
 The PASS-marker requirement is the forcing function: a testbench that
-finishes without asserting all its vectors (e.g. a silent early $finish, or a
-testbench that never checks anything) still fails CI. This keeps the pipeline
-green only when the RTL is genuinely verified, never vacuously.
+finishes without asserting all its vectors (e.g. a silent early $finish, or
+a testbench that never checks anything) still fails CI.
 
-Usage: python3 scripts/run_tb.py [optional path to iverilog bin dir]
+Suites:
+  * sim/  — the Icarus targets, one make invocation PER BENCH with its own
+    timeout and process-group kill, so a stall is named by the last target
+    started instead of wedging the whole job: blake2b, blamka, index,
+    compress, addr, fill, rfc, axi, cl (the 4-channel F1 CL top bench).
+  * hdl/ — any legacy tb_*.v / *_tb.v benches found there (kept for
+    backwards compatibility).
+
+Usage: python3 scripts/run_tb.py
 Exit: 0 if all testbenches pass, 1 otherwise.
 """
 import os
 import re
-import shutil
+import signal
 import subprocess
 import sys
-import tempfile
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HDL_DIR = os.path.join(ROOT, "hdl")
+SIM_DIR = os.path.join(ROOT, "sim")
 PASS_MARKER = "PASS"
+
+SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
+               "fill", "rfc", "axi", "cl"]
+PER_TARGET_TIMEOUT = 120  # seconds; any bench here finishes in <30 s
+
+
+def gh_annotation(level, title, message):
+    """Emit a workflow command annotation. Annotations are retrievable
+    through the API even when the raw log download is not."""
+    safe_t = title.replace(",", "%2C")
+    safe_m = message.replace("\r", "").replace("\n", "%0A").replace(",", "%2C")
+    print(f"::{level} title={safe_t}::{safe_m}", flush=True)
 
 
 def find_testbenches(hdl_dir):
     tbs = []
     for dirpath, _dirs, files in os.walk(hdl_dir):
         for f in sorted(files):
-            # match both tb_foo.v and foo_tb.v conventions; keep it simple:
             if re.match(r"^(tb_.*|.*_tb)\.v$", f):
                 tbs.append(os.path.join(dirpath, f))
     return sorted(tbs)
 
 
-def run_one(tb_path, iverilog, vvp):
-    """Returns (ok: bool, log: str)."""
-    workdir = tempfile.mkdtemp(prefix="rtl_smoke_")
-    binary = os.path.join(workdir, "sim")
-    vlog = os.path.join(workdir, "compile.log")
-    simlog = os.path.join(workdir, "sim.log")
+def run_streaming(cmd, cwd, timeout, label, require_pass):
+    """Run a command, streaming its output live, and kill the whole
+    process GROUP on timeout (a hung grandchild under make — e.g. vvp —
+    would otherwise outlive make and wedge the job)."""
+    buf = []
 
-    # iverilog needs the DUT on a module-library path. We compile from the
-    # hdl/ root and use -y rtl so a module named `foo` is resolved from
-    # hdl/rtl/foo.v (the standard Verilog source-library convention).
-    rtl_lib = os.path.join(HDL_DIR, "rtl")
-    cmd = [iverilog, "-g2005-sv", "-y", rtl_lib, "-o", binary, tb_path]
-    try:
-        cp = subprocess.run(
-            cmd, cwd=HDL_DIR, capture_output=True, text=True,
-            timeout=120,
+    def reader(stream):
+        for line in stream:
+            buf.append(line)
+            print(line, end="", flush=True)
+
+    print(f"[run] {' '.join(cmd)}\n", flush=True)
+    with subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, start_new_session=True,
+    ) as proc:
+        t = threading.Thread(target=reader, args=(proc.stdout,), daemon=True)
+        t.start()
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"\n[FAIL] {label}: timed out after {timeout}s — killing "
+                  f"process group", flush=True)
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            t.join(timeout=5)
+            gh_annotation("error", f"STALL: {label}",
+                          "timed out after %ds; output tail:\n%s"
+                          % (timeout, "".join(buf[-20:])[-800:]))
+            return False
+        t.join(timeout=5)
+    out = "".join(buf)
+    if rc != 0:
+        print(f"\n[FAIL] {label}: exit code {rc}\n")
+        gh_annotation("error", f"EXIT {rc}: {label}",
+                      out[-800:])
+        return False
+    if require_pass and PASS_MARKER not in out:
+        print(f"\n[FAIL] {label}: output did not contain '{PASS_MARKER}'\n")
+        gh_annotation("error", f"NO-PASS: {label}",
+                      out[-800:])
+        return False
+    print(f"\n[OK]   {label}\n")
+    return True
+
+
+def run_sim_suite():
+    ok = True
+    if not os.path.isdir(SIM_DIR):
+        return ok
+    # One make per bench: a compile error, missing-PASS, or stall is
+    # attributed to the exact bench, and a stall can't block the rest of
+    # the job for more than the per-target timeout. (A bare `make -C sim`
+    # would also pick the Makefile's first rule — the perf bench — as the
+    # default goal.)
+    for tgt in SIM_TARGETS:
+        ok &= run_streaming(
+            ["make", "-C", SIM_DIR, tgt], cwd=ROOT,
+            timeout=PER_TARGET_TIMEOUT,
+            label=f"sim: make -C sim {tgt}", require_pass=True,
         )
-        with open(vlog, "w") as fh:
-            fh.write(cp.stdout + cp.stderr)
-    except subprocess.TimeoutExpired:
-        return False, "iverilog timeout\n"
-
-    if cp.returncode != 0:
-        return False, open(vlog).read()
-
-    try:
-        sp = subprocess.run(
-            [vvp, binary], cwd=HDL_DIR, capture_output=True, text=True, timeout=120)
-        with open(simlog, "w") as fh:
-            fh.write(sp.stdout + sp.stderr)
-    except subprocess.TimeoutExpired:
-        return False, "vvp timeout\n"
-
-    if sp.returncode != 0:
-        return False, open(simlog).read()
-
-    out = open(simlog).read()
-    if PASS_MARKER not in out:
-        return False, (
-            f"simulation did not print '{PASS_MARKER}' (silent/incomplete pass)\n"
-            + out
-        )
-    return True, out
+    return ok
 
 
-def main():
+def run_legacy_hdl():
+    import shutil
+    import tempfile
+
     iverilog = shutil.which("iverilog")
     vvp = shutil.which("vvp")
     if not iverilog or not vvp:
-        print("ERROR: iverilog/vvp not on PATH")
-        return 1
+        print("WARNING: iverilog/vvp not on PATH — skipping legacy hdl/ benches")
+        return True
 
-    tbs = find_testbenches(HDL_DIR)
-    if not tbs:
-        print("ERROR: no tb_*.v / *_tb.v testbenches found under hdl/")
-        return 1
-
-    failures = 0
-    for tb in tbs:
+    ok = True
+    for tb in find_testbenches(HDL_DIR):
         rel = os.path.relpath(tb, ROOT)
+        workdir = tempfile.mkdtemp(prefix="rtl_smoke_")
+        binary = os.path.join(workdir, "sim")
         print(f"[run] {rel}")
-        ok, log = run_one(tb, iverilog, vvp)
-        print(log.rstrip())
-        if not ok:
-            failures += 1
-            print(f"[FAIL] {rel}\n")
+        cp = subprocess.run(
+            [iverilog, "-g2005-sv", "-y", os.path.join(HDL_DIR, "rtl"),
+             "-o", binary, tb],
+            cwd=HDL_DIR, capture_output=True, text=True, timeout=120,
+        )
+        if cp.returncode != 0:
+            print((cp.stdout or "") + (cp.stderr or ""))
+            print(f"[FAIL] {rel} (compile): exit code {cp.returncode}\n")
+            ok = False
+            continue
+        cp = subprocess.run([vvp, binary], cwd=HDL_DIR,
+                            capture_output=True, text=True, timeout=120)
+        out = (cp.stdout or "") + (cp.stderr or "")
+        print(out.rstrip())
+        if cp.returncode != 0 or PASS_MARKER not in out:
+            print(f"[FAIL] {rel} (run)\n")
+            ok = False
         else:
-            print(f"[OK]   {rel}\n")
+            print(f"[OK]   {rel} (run)\n")
+    return ok
 
-    if failures:
-        print(f"{failures} testbench(s) FAILED")
+
+def main():
+    if not os.path.isdir(SIM_DIR):
+        print("ERROR: no sim/ directory")
+        return 1
+    ok = run_sim_suite()
+    ok &= run_legacy_hdl()
+    if not ok:
+        print("TESTBENCH FAILURES")
         return 1
     print("ALL TESTBENCHES PASS")
     return 0
