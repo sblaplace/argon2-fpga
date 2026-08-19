@@ -124,7 +124,8 @@ module cl_argon2_core #(
     end
 
     always_comb begin
-        status_reg = '{default:32'd0};
+        for (int k = 0; k < NREG; k = k + 1)
+            status_reg[k] = 32'd0;
         status_reg[`A2_OCL_STATUS] = {24'd0, done_latch, lane_busy};
     end
 

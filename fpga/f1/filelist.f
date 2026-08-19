@@ -24,7 +24,5 @@
 ../../rtl/argon2/argon2_fill_job.sv
 ../../rtl/argon2/argon2_axi_mm.sv
 ../../rtl/argon2/argon2_fill_axi.sv
-design/cl_argon2_axi_if.sv
 design/cl_argon2_ocl.sv
 design/cl_argon2_core.sv
-design/cl_argon2_ddr_connect.sv

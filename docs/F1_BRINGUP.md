@@ -209,7 +209,7 @@ These numbers are the gate for the next hardware (Alveo U50, 32 HBM pseudo-chann
 | Icarus build fails with `unknown module type argon2_fill_axi` | Missing `rtl/` on the include path — add `-I../../rtl/include -I design` and `-f filelist.f` |
 | `STATUS` never reaches `done==0xF` | `p4_mode` bit mismatched; or `LANE_LENGTH` / `MEMORY_BLKS` typoed so one lane waits at `SLICE_SYNC` forever |
 | `done` asserts but data mismatch on beat 0 / 15 | Old `argon2_fill_ctrl` handshake bug (word 0 twice / word 15 never) — already fixed by driving `c_in_*` combinationally from `state`/`beat` |
-| 4-channel BW ≈ 1-channel BW | Shared SODIMM or a single AXI interconnect — re-check `cl_sh_ddr_areset_n` and that each `cl_argon2_ddr_connect` drives a distinct `sh_ddr` `axi_bus_t` |
+| 4-channel BW ≈ 1-channel BW | Shared SODIMM or a single AXI interconnect — re-check `cl_sh_ddr_areset_n` and that each `DDR_AXI_*` channel slice is wired to a distinct `sh_ddr` port |
 | OCL writes silently ignored | `awaddr` word vs. byte confusion — OCL BAR is byte-addressed, so word k is at byte `k*4`; lane L base is `(16 + L*8)*4 = 0x40 + 0x20*L` |
 
 ## 8. References

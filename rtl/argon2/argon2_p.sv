@@ -17,8 +17,8 @@ module argon2_p (
     state_t state;
 
     logic        g_in_valid;
-    logic        g_out_valid;
-    logic [63:0] ga_i [0:3];
+    logic [3:0]  g_out_valid;      // one per GB instance (equal latency);
+    logic [63:0] ga_i [0:3];       // the FSM waits for ALL of them.
     logic [63:0] gb_i [0:3];
     logic [63:0] gc_i [0:3];
     logic [63:0] gd_i [0:3];
@@ -38,7 +38,7 @@ module argon2_p (
                 .b_i      (gb_i[gi]),
                 .c_i      (gc_i[gi]),
                 .d_i      (gd_i[gi]),
-                .out_valid(g_out_valid), // all four share the same latency
+                .out_valid(g_out_valid[gi]),
                 .a_o      (ga_o[gi]),
                 .b_o      (gb_o[gi]),
                 .c_o      (gc_o[gi]),
@@ -81,7 +81,7 @@ module argon2_p (
                     end
                 end
                 COL: begin
-                    if (g_out_valid) begin
+                    if (&g_out_valid) begin
                         // Diagonal GBs: (0,5,10,15), (1,6,11,12), (2,7,8,13), (3,4,9,14)
                         ga_i[0] <= ga_o[0]; gb_i[0] <= gb_o[1]; gc_i[0] <= gc_o[2]; gd_i[0] <= gd_o[3];
                         ga_i[1] <= ga_o[1]; gb_i[1] <= gb_o[2]; gc_i[1] <= gc_o[3]; gd_i[1] <= gd_o[0];
@@ -92,7 +92,7 @@ module argon2_p (
                     end
                 end
                 DIAG: begin
-                    if (g_out_valid) begin
+                    if (&g_out_valid) begin
                         v_o[64*0  +: 64] <= ga_o[0];
                         v_o[64*5  +: 64] <= gb_o[0];
                         v_o[64*10 +: 64] <= gc_o[0];

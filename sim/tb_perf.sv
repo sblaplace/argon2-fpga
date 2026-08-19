@@ -204,39 +204,66 @@ module tb_perf #(
     );
 
     // ---- run one job ----------------------------------------------------
-    task automatic run_job(ref logic      start_sig,
-                           ref logic      busy_sig,
-                           ref logic      done_sig,
-                           ref longint    cyc_start,
-                           ref longint    cyc_end);
-        start_sig = 1'b1;
-        @(posedge clk);
-        start_sig = 1'b0;
-        cyc_start = sim_cycles;
-        while (!done_sig) begin
+    // (Icarus doesn't support ref or unpacked-array task ports, so the
+    // two phases get dedicated tasks and module-scope cycle counters.)
+    longint i_cyc0, i_cyc1, d_cyc0, d_cyc1;
+
+    task automatic run_ideal;
+        begin
+            a_start = 1'b1;
             @(posedge clk);
-            if (sim_cycles - cyc_start > 64'd100_000_000) begin
-                $display("tb_perf: TIMEOUT waiting for done");
-                $finish;
+            a_start = 1'b0;
+            i_cyc0 = sim_cycles;
+            while (!a_done) begin
+                @(posedge clk);
+                if (sim_cycles - i_cyc0 > 64'd100_000_000) begin
+                    $display("tb_perf: TIMEOUT waiting for done");
+                    $finish;
+                end
             end
+            i_cyc1 = sim_cycles;
         end
-        cyc_end = sim_cycles;
+    endtask
+
+    task automatic run_ddr4;
+        begin
+            b_start = 1'b1;
+            @(posedge clk);
+            b_start = 1'b0;
+            d_cyc0 = sim_cycles;
+            while (!b_done) begin
+                @(posedge clk);
+                if (sim_cycles - d_cyc0 > 64'd100_000_000) begin
+                    $display("tb_perf: TIMEOUT waiting for done");
+                    $finish;
+                end
+            end
+            d_cyc1 = sim_cycles;
+        end
     endtask
 
     // ---- print an FSM cycle histogram -----------------------------------
-    task automatic dump_hist(input longint h [0:31], input string who);
+    task automatic dump_hist(input integer which, input string who);
         longint tot;
         tot = 0;
-        for (int s = 1; s <= 15; s = s + 1) tot = tot + h[s];
-        $display("%s FSM cycles (excl. IDLE): %0d", who, tot);
-        for (int s = 1; s <= 15; s = s + 1)
-            if (h[s] != 0)
-                $display("   %-12s %0d  (%0.1f%%)", st_name[s], h[s],
-                         100.0 * h[s] / (tot != 0 ? tot : 1));
+        if (which == 0) begin
+            for (int s = 1; s <= 15; s = s + 1) tot = tot + a_hist[s];
+            $display("%s FSM cycles (excl. IDLE): %0d", who, tot);
+            for (int s = 1; s <= 15; s = s + 1)
+                if (a_hist[s] != 0)
+                    $display("   %-12s %0d  (%0.1f%%)", st_name[s], a_hist[s],
+                             100.0 * a_hist[s] / (tot != 0 ? tot : 1));
+        end else begin
+            for (int s = 1; s <= 15; s = s + 1) tot = tot + b_hist[s];
+            $display("%s FSM cycles (excl. IDLE): %0d", who, tot);
+            for (int s = 1; s <= 15; s = s + 1)
+                if (b_hist[s] != 0)
+                    $display("   %-12s %0d  (%0.1f%%)", st_name[s], b_hist[s],
+                             100.0 * b_hist[s] / (tot != 0 ? tot : 1));
+        end
     endtask
 
     initial begin
-        longint i_cyc0, i_cyc1, d_cyc0, d_cyc1;
         real    i_cyc_blk, d_cyc_blk;
         real    i_cand, d_cand;
         real    rd_gb, wr_gb, util, ref_pct;
@@ -273,10 +300,10 @@ module tb_perf #(
                  (TYPE_I==0)?"argon2d":(TYPE_I==1)?"argon2i":"argon2id", N_P);
 
         // Phase A: ideal memory
-        run_job(a_start, a_busy, a_done, i_cyc0, i_cyc1);
+        run_ideal;
         i_cyc_blk = (i_cyc1 - i_cyc0) / (1.0 * NBLK * PASSES);
         i_cand = F_MHZ * 1e6 / (i_cyc_blk * CAND_BLKS);
-        dump_hist(a_hist, "IDEAL");
+        dump_hist(0, "IDEAL");
 
         $display("IDEAL: %0d cycles, %0.1f cyc/blk, %0.3f Mblk/s, %0.3f cand/s (1 GiB t=3, one lane)",
                  i_cyc1 - i_cyc0, i_cyc_blk, F_MHZ / i_cyc_blk, i_cand);
@@ -287,7 +314,7 @@ module tb_perf #(
         d_rd0 = ddr_rd_beats; d_wr0 = ddr_wr_beats; d_busy0 = ddr_busy;
         d_ref0 = ddr_refresh;
         d_rrq0 = ddr_rd_req; d_wrq0 = ddr_wr_req;
-        run_job(b_start, b_busy, b_done, d_cyc0, d_cyc1);
+        run_ddr4;
         d_cyc_blk = (d_cyc1 - d_cyc0) / (1.0 * NBLK * PASSES);
         d_cand = F_MHZ * 1e6 / (d_cyc_blk * CAND_BLKS);
 
@@ -311,7 +338,7 @@ module tb_perf #(
                  ddr_rd_req - d_rrq0, ddr_wr_req - d_wrq0,
                  ddr_rd_beats - d_rd0, ddr_wr_beats - d_wr0);
         $display("F1 x4 : %0.3f cand/s aggregate (4 independent channels)", 4.0 * d_cand);
-        dump_hist(b_hist, "DDR4 ");
+        dump_hist(1, "DDR4 ");
 
         $display("tb_perf: done");
         $finish;

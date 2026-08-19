@@ -60,6 +60,8 @@ module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
     logic [31:0]       w_data;
     logic [3:0]        w_strb;
     logic              commit;
+    logic [31:0]       w_merge;   // RMW temp: Icarus can't bit-select a
+                                  // register-file word in place
 
     assign awready = !aw_cap;
     assign wready  = !w_cap;
@@ -71,7 +73,8 @@ module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
             w_cap  <= 1'b0;
             bvalid <= 1'b0;
             reg_wr <= '0;
-            regf   <= '{default:32'd0};
+            for (int k = 0; k < NREG; k = k + 1)
+                regf[k] <= 32'd0;
         end else begin
             reg_wr <= '0;
             if (awready && awvalid) begin
@@ -84,9 +87,11 @@ module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
                 w_cap  <= 1'b1;
             end
             if (commit) begin
+                w_merge = regf[aw_addr[AW+1:2]];
                 for (int b = 0; b < 4; b++)
                     if (w_strb[b])
-                        regf[aw_addr[AW+1:2]][b*8 +: 8] <= w_data[b*8 +: 8];
+                        w_merge[b*8 +: 8] = w_data[b*8 +: 8];
+                regf[aw_addr[AW+1:2]] <= w_merge;
                 reg_wr[aw_addr[AW+1:2]] <= 1'b1;
                 aw_cap <= 1'b0;
                 w_cap  <= 1'b0;

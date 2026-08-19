@@ -59,12 +59,13 @@ def run_sim_suite():
     ok = True
     if not os.path.isdir(SIM_DIR):
         return ok
-    # Unit benches + RFC p=4 + AXI (Icarus).
+    # Unit benches + RFC p=4 + AXI (Icarus). Explicit `all`: the Makefile's
+    # first rule is the perf bench, and a bare `make` used to pick that up.
     cp = subprocess.run(
-        ["make", "-C", SIM_DIR], cwd=ROOT, capture_output=True, text=True,
+        ["make", "-C", SIM_DIR, "all"], cwd=ROOT, capture_output=True, text=True,
         timeout=1800,
     )
-    ok &= check_output("sim: make -C sim (all benches)", cp, require_pass=True)
+    ok &= check_output("sim: make -C sim all (all benches)", cp, require_pass=True)
     # 4-channel F1 CL top bench.
     cp = subprocess.run(
         ["make", "-C", SIM_DIR, "cl"], cwd=ROOT, capture_output=True, text=True,

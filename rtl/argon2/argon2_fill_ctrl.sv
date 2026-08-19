@@ -76,7 +76,7 @@ module argon2_fill_ctrl #(
     always_comb begin
         wb_hit_ref = 1'b0;
         wb_hit_ref_n = 1'b0;
-        for (int ii=0; ii<WB_DEPTH; ii++) begin
+        for (int ii=0; ii<WB_DEPTH; ii = ii + 1) begin
             logic in_fifo;
             in_fifo = 1'b0;
             if (wb_count != 0) begin
@@ -320,10 +320,10 @@ module argon2_fill_ctrl #(
                 DISPATCH: begin
                     beat <= 5'd0;
                     if (independent && pref_ready) begin
-                        for (int i=0;i<16;i++) ref_q[i] <= pref_q[i];
+                        for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         pref_ready <= 1'b0; pref_issued <= 1'b0; pref_accepted <= 1'b0;
                         if (cache_valid) begin
-                            for (int i=0;i<16;i++) prev_q[i] <= cache_q[i];
+                            for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                             if (with_xor) begin
                                 if (dest_done) begin
                                     dstream <= 1'b0;
@@ -357,7 +357,7 @@ module argon2_fill_ctrl #(
                             state <= ISSUE_REF;
                         end
                     end else if (cache_valid) begin
-                        for (int i=0;i<16;i++) prev_q[i] <= cache_q[i];
+                        for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                         dstream <= 1'b0;
                         state <= DREF_SETTLE;
                     end else begin

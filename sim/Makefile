@@ -54,8 +54,8 @@ SRC_tb_cl_argon2 := \
 	$(RTL)/argon2/argon2_index.sv \
 	$(RTL)/argon2/argon2_addr_gen.sv $(RTL)/argon2/argon2_fill_ctrl.sv \
 	$(RTL)/argon2/argon2_fill_job.sv $(RTL)/argon2/argon2_axi_mm.sv $(RTL)/argon2/argon2_fill_axi.sv \
-	$(F1DES)/cl_argon2_axi_if.sv $(F1DES)/cl_argon2_ocl.sv \
-	$(F1DES)/cl_argon2_core.sv $(F1DES)/cl_argon2_ddr_connect.sv $(F1DES)/cl_argon2.sv \
+	$(F1DES)/cl_argon2_ocl.sv \
+	$(F1DES)/cl_argon2_core.sv $(F1DES)/cl_argon2.sv \
 	tb_axi_ram.sv
 
 # ---- perf bench -----------------------------------------------------------
@@ -63,6 +63,11 @@ SRC_tb_cl_argon2 := \
 # and vs a DDR4-2400 channel timing model (tb_ddr4_ram). PERF_BLKS sets the
 # working set (m', in 1 KiB blocks); the printed cand/s is projected to the
 # 1 GiB / t=3 reference job.
+#
+# NOTE: `all` (not `perf`) is the default goal — run_tb.py and humans
+# running bare `make` get the functional suite.
+
+.DEFAULT_GOAL := all
 
 PERF_BLKS ?= 4096
 PERF_NP   ?= 1

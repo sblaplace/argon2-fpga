@@ -72,6 +72,8 @@ module argon2_compress #(
     integer i;
     logic [63:0] xv, yv, dv, rv;
     logic [4:0]  drain_idx;
+    logic [1023:0] pv;   // gather temp: build a P input, then write the
+    logic [1023:0] q;    // whole word (Icarus can't bit-select mem words)
 
     always_comb begin
         drain_idx = out_valid ? (beat + 5'd1) : 5'd0;
@@ -80,34 +82,37 @@ module argon2_compress #(
     // Gather the inputs for one wave: group g feeds P instance g%N_P.
     // g < 8 is a row permutation (16 consecutive words); g >= 8 is column
     // g-8 (words gathered from the column strides, see RFC 9106 §3.5).
+    // Each P input is assembled in `pv` and stored with a single
+    // whole-word write (portable across Icarus and Verilator).
     always_comb begin
         for (int w = 0; w < N_P; w = w + 1) begin
             int g;
             int c;
             g = group + w;
-            p_in[w] = 1024'd0;
+            pv = 1024'd0;
             if (g < 8) begin
                 for (int i2 = 0; i2 < 16; i2 = i2 + 1)
-                    p_in[w][64*i2 +: 64] = blk[g*16 + i2];
+                    pv[64*i2 +: 64] = blk[g*16 + i2];
             end else if (g < 16) begin
                 c = g - 8;
-                p_in[w][64*0  +: 64] = blk[2*c +  0];
-                p_in[w][64*1  +: 64] = blk[2*c +  1];
-                p_in[w][64*2  +: 64] = blk[2*c + 16];
-                p_in[w][64*3  +: 64] = blk[2*c + 17];
-                p_in[w][64*4  +: 64] = blk[2*c + 32];
-                p_in[w][64*5  +: 64] = blk[2*c + 33];
-                p_in[w][64*6  +: 64] = blk[2*c + 48];
-                p_in[w][64*7  +: 64] = blk[2*c + 49];
-                p_in[w][64*8  +: 64] = blk[2*c + 64];
-                p_in[w][64*9  +: 64] = blk[2*c + 65];
-                p_in[w][64*10 +: 64] = blk[2*c + 80];
-                p_in[w][64*11 +: 64] = blk[2*c + 81];
-                p_in[w][64*12 +: 64] = blk[2*c + 96];
-                p_in[w][64*13 +: 64] = blk[2*c + 97];
-                p_in[w][64*14 +: 64] = blk[2*c + 112];
-                p_in[w][64*15 +: 64] = blk[2*c + 113];
+                pv[64*0  +: 64] = blk[2*c +  0];
+                pv[64*1  +: 64] = blk[2*c +  1];
+                pv[64*2  +: 64] = blk[2*c + 16];
+                pv[64*3  +: 64] = blk[2*c + 17];
+                pv[64*4  +: 64] = blk[2*c + 32];
+                pv[64*5  +: 64] = blk[2*c + 33];
+                pv[64*6  +: 64] = blk[2*c + 48];
+                pv[64*7  +: 64] = blk[2*c + 49];
+                pv[64*8  +: 64] = blk[2*c + 64];
+                pv[64*9  +: 64] = blk[2*c + 65];
+                pv[64*10 +: 64] = blk[2*c + 80];
+                pv[64*11 +: 64] = blk[2*c + 81];
+                pv[64*12 +: 64] = blk[2*c + 96];
+                pv[64*13 +: 64] = blk[2*c + 97];
+                pv[64*14 +: 64] = blk[2*c + 112];
+                pv[64*15 +: 64] = blk[2*c + 113];
             end
+            p_in[w] = pv;
         end
     end
 
@@ -159,28 +164,29 @@ module argon2_compress #(
                         for (int w = 0; w < N_P; w = w + 1) begin
                             int g;
                             int c;
+                            q = p_out[w];
                             g = group + w;
                             if (g < 8) begin
                                 for (int i2 = 0; i2 < 16; i2 = i2 + 1)
-                                    blk[g*16 + i2] <= p_out[w][64*i2 +: 64];
+                                    blk[g*16 + i2] <= q[64*i2 +: 64];
                             end else if (g < 16) begin
                                 c = g - 8;
-                                blk[2*c +  0] <= p_out[w][64*0  +: 64];
-                                blk[2*c +  1] <= p_out[w][64*1  +: 64];
-                                blk[2*c + 16] <= p_out[w][64*2  +: 64];
-                                blk[2*c + 17] <= p_out[w][64*3  +: 64];
-                                blk[2*c + 32] <= p_out[w][64*4  +: 64];
-                                blk[2*c + 33] <= p_out[w][64*5  +: 64];
-                                blk[2*c + 48] <= p_out[w][64*6  +: 64];
-                                blk[2*c + 49] <= p_out[w][64*7  +: 64];
-                                blk[2*c + 64] <= p_out[w][64*8  +: 64];
-                                blk[2*c + 65] <= p_out[w][64*9  +: 64];
-                                blk[2*c + 80] <= p_out[w][64*10 +: 64];
-                                blk[2*c + 81] <= p_out[w][64*11 +: 64];
-                                blk[2*c + 96] <= p_out[w][64*12 +: 64];
-                                blk[2*c + 97] <= p_out[w][64*13 +: 64];
-                                blk[2*c + 112] <= p_out[w][64*14 +: 64];
-                                blk[2*c + 113] <= p_out[w][64*15 +: 64];
+                                blk[2*c +  0] <= q[64*0  +: 64];
+                                blk[2*c +  1] <= q[64*1  +: 64];
+                                blk[2*c + 16] <= q[64*2  +: 64];
+                                blk[2*c + 17] <= q[64*3  +: 64];
+                                blk[2*c + 32] <= q[64*4  +: 64];
+                                blk[2*c + 33] <= q[64*5  +: 64];
+                                blk[2*c + 48] <= q[64*6  +: 64];
+                                blk[2*c + 49] <= q[64*7  +: 64];
+                                blk[2*c + 64] <= q[64*8  +: 64];
+                                blk[2*c + 65] <= q[64*9  +: 64];
+                                blk[2*c + 80] <= q[64*10 +: 64];
+                                blk[2*c + 81] <= q[64*11 +: 64];
+                                blk[2*c + 96] <= q[64*12 +: 64];
+                                blk[2*c + 97] <= q[64*13 +: 64];
+                                blk[2*c + 112] <= q[64*14 +: 64];
+                                blk[2*c + 113] <= q[64*15 +: 64];
                             end
                         end
                         if (group + N_P >= 16) begin

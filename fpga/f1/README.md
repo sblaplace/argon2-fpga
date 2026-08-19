@@ -13,16 +13,17 @@ fpga/f1/
     cl_argon2.sv          # CL top — the F1 shell port list (drop-in for cl_dram_dma)
     cl_argon2_core.sv     # functional core: 4× argon2_fill_axi + OCL + slice-sync
     cl_argon2_ocl.sv      # AXI4-lite OCL register slave (host programming)
-    cl_argon2_ddr_connect.sv  # adapts one shell axi_bus_t to the core's flat AXI
-    cl_argon2_axi_if.sv   # local axi_bus_t (used only when no HDK is present)
     cl_argon2_defines.vh  # params + OCL register map
 ```
 
 `cl_argon2_core` is deliberately **HDK-independent**: it has flat AXI4
 master ports (one per channel) and a flat AXI4-lite OCL slave port, so it
-can be simulated/linted on its own. `cl_argon2.sv` is the thin HDK-facing
-adapter that maps the standard `cl_dram_dma` port list (four `DDRx_AXI`
-`axi_bus_t` buses + flat `sh_ocl_*` + clock/reset/FLR) onto it.
+can be simulated/linted on its own. `cl_argon2.sv` presents the shell port
+list with the four DDR buses as **flat vector ports** (`DDR_AXI_*`, one
+bit/word slice per channel — interface-free so any simulator, including
+Icarus, can elaborate the design standalone). A real HDK build writes a
+thin wrapper (or edits this top) mapping `DDR_AXI_*.w[n]` onto the
+shell's `DDRx_AXI` ports / `axi_bus_t` members.
 
 ## Topology
 
@@ -64,11 +65,11 @@ register file is word-indexed internally (lane L's `LANE_CTRL` is word
    and rename `cl_argon2.sv` to the example's top module name, **or** set
    the example's top module to `cl_argon2` (edit the example's build
    manifest). Keep `rtl/` next to it on the include/compile path.
-2. Make sure the `axi_bus_t` type matches your HDK release. By default
-   `cl_argon2_axi_if.sv` provides a local `axi_bus_t`. For a real build,
-   define `AXI_BUS_T_DEFINED` first (or `include` your HDK's
-   `cl_dram_dma_pkg.sv` / `axi_bus_defines.vh` before `cl_argon2.sv`) so
-   the shell's exact bus type is shared. **Diff the port list against your
+2. The DDR buses are flat `DDR_AXI_*` vectors (channel n = bit n) so the
+   design elaborates without the HDK. For a real build, edit `cl_argon2.sv`
+   (or write a wrapper) to connect `DDR_AXI_*.w[n]` onto your HDK's
+   per-channel `DDRx_AXI` ports / `axi_bus_t` members from
+   `cl_dram_dma_pkg.sv`. **Diff the port list against your
    HDK's `cl_ports.vh` / example top** — if your release adds signals the
    example doesn't (e.g. an OCL `awlen`/`awsize`, or DDR `awregion`), add
    them to the port list and tie them off.
