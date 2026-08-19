@@ -290,10 +290,12 @@ module tb_cl_argon2 #(
 
         // Kick all lanes simultaneously.
         ocl_write(32'h00, 32'd1);
+        $display("[dbg] GLOBAL_START written");
 
-        // Poll STATUS until all four report done.
+        // Poll STATUS until all four report done. Any real run finishes in
+        // a few thousand polls; the cap just keeps a broken run fast.
         done = 4'b0; to = 0;
-        while (done != 4'b1111 && to < 2000000) begin
+        while (done != 4'b1111 && to < 20000) begin
             ocl_read(32'h08, st);
             done = st[7:4];
             to = to + 1;
@@ -301,6 +303,24 @@ module tb_cl_argon2 #(
 
         if (done != 4'b1111) begin
             $display("FAIL timeout (STATUS=0x%08h, polls=%0d)", st, to);
+            // Postmortem: read the lane config back through the OCL and
+            // peek at each lane's fill FSM state directly.
+`ifndef VERILATOR
+            for (int L = 0; L < NUM_DDR; L = L + 1) begin
+                logic [31:0] base;
+                logic [31:0] lc, ps, ll, mb;
+                base = 32'h40 + (32'(L) * 32'h20);
+                ocl_read(base + 32'h00, lc);
+                ocl_read(base + 32'h04, ps);
+                ocl_read(base + 32'h08, ll);
+                ocl_read(base + 32'h0C, mb);
+                $display("[dbg] lane%0d LANE_CTRL=%08h PASSES=%08h LEN=%08h BLKS=%08h state=%0d busy=%b done=%b",
+                         L, lc, ps, ll, mb,
+                         dut.u_core.lane[L].u_fill.state_o,
+                         dut.u_core.lane_busy[L],
+                         dut.u_core.lane_done[L]);
+            end
+`endif
             errors = errors + 1;
         end else begin
             $display("all four lanes done in %0d OCL polls", to);
