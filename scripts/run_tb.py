@@ -55,23 +55,59 @@ def check_output(label, cp, require_pass):
     return True
 
 
+def run_streaming(cmd, cwd, timeout, label, require_pass):
+    """Run a command, streaming its output live (so CI logs show exactly
+    which bench stalls), and kill the whole process GROUP on timeout —
+    a hung grandchild (vvp under make) would otherwise wedge the job."""
+    import os
+    import signal
+
+    buf = []
+    print(f"[run] {' '.join(cmd)}\n", flush=True)
+    with subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, start_new_session=True,
+    ) as proc:
+        try:
+            for line in proc.stdout:
+                buf.append(line)
+                print(line, end="", flush=True)
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"\n[FAIL] {label}: timed out after {timeout}s — killing "
+                  f"process group", flush=True)
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            return False
+    out = "".join(buf)
+    if rc != 0:
+        print(f"\n[FAIL] {label}: exit code {rc}\n")
+        return False
+    if require_pass and PASS_MARKER not in out:
+        print(f"\n[FAIL] {label}: output did not contain '{PASS_MARKER}'\n")
+        return False
+    print(f"\n[OK]   {label}\n")
+    return True
+
+
 def run_sim_suite():
     ok = True
     if not os.path.isdir(SIM_DIR):
         return ok
     # Unit benches + RFC p=4 + AXI (Icarus). Explicit `all`: the Makefile's
     # first rule is the perf bench, and a bare `make` used to pick that up.
-    cp = subprocess.run(
-        ["make", "-C", SIM_DIR, "all"], cwd=ROOT, capture_output=True, text=True,
-        timeout=1800,
+    ok &= run_streaming(
+        ["make", "-C", SIM_DIR, "all"], cwd=ROOT, timeout=1200,
+        label="sim: make -C sim all (all benches)", require_pass=True,
     )
-    ok &= check_output("sim: make -C sim all (all benches)", cp, require_pass=True)
     # 4-channel F1 CL top bench.
-    cp = subprocess.run(
-        ["make", "-C", SIM_DIR, "cl"], cwd=ROOT, capture_output=True, text=True,
-        timeout=1800,
+    ok &= run_streaming(
+        ["make", "-C", SIM_DIR, "cl"], cwd=ROOT, timeout=1200,
+        label="sim: make -C sim cl (tb_cl_argon2)", require_pass=True,
     )
-    ok &= check_output("sim: make -C sim cl (tb_cl_argon2)", cp, require_pass=True)
     return ok
 
 
