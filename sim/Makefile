@@ -39,7 +39,21 @@ SRC_tb_argon2_axi       := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_fill_axi.sv \
 	tb_axi_ram.sv
 
-.PHONY: all blake2b blamka index compress addr fill rfc axi vectors clean
+# ---- F1 CL top-level bench ------------------------------------------------
+F1DES := ../fpga/f1/design
+
+SRC_tb_cl_argon2 := \
+	$(RTL)/blake2b/blake2b_g.sv $(RTL)/blake2b/blake2b_round.sv \
+	$(RTL)/blake2b/blake2b_compress.sv $(RTL)/blake2b/blake2b_core.sv \
+	$(RTL)/argon2/blamka_g.sv $(RTL)/argon2/argon2_p.sv $(RTL)/argon2/argon2_compress.sv \
+	$(RTL)/argon2/argon2_index.sv $(RTL)/argon2/argon2_ref_area.sv \
+	$(RTL)/argon2/argon2_addr_gen.sv $(RTL)/argon2/argon2_fill_ctrl.sv \
+	$(RTL)/argon2/argon2_fill_job.sv $(RTL)/argon2/argon2_axi_mm.sv $(RTL)/argon2/argon2_fill_axi.sv \
+	$(F1DES)/cl_argon2_axi_if.sv $(F1DES)/cl_argon2_ocl.sv \
+	$(F1DES)/cl_argon2_core.sv $(F1DES)/cl_argon2_ddr_connect.sv $(F1DES)/cl_argon2.sv \
+	tb_axi_ram.sv
+
+.PHONY: all blake2b blamka index compress addr fill rfc axi cl vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
 all: blake2b blamka index compress addr fill rfc axi
@@ -84,6 +98,22 @@ run-%: %.out
 %.out: %.sv
 	$(IVERILOG) -g2012 -I$(INCDIR) -o $@ $< $(SRC_$*)
 
+endif
+
+# Top-level F1 CL bench: instantiate cl_argon2 with 4 behavioral DDR RAMs
+# and an OCL BFM, run a known-answer argon2i job on all four channels.
+cl: vectors run-tb_cl_argon2
+
+ifeq ($(SIM),verilator)
+run-tb_cl_argon2: tb_cl_argon2.sv
+	$(VERILATOR) $(VFLAGS) -I$(F1DES) --Mdir $(OBJ)/tb_cl_argon2 --main --exe --cc -o tb_cl_argon2 tb_cl_argon2.sv $(SRC_tb_cl_argon2) --top-module tb_cl_argon2
+	@ln -sf Vtb_cl_argon2__pch.h $(OBJ)/tb_cl_argon2/Vtb_cl_argon2__pch.h.fast
+	@ln -sf Vtb_cl_argon2__pch.h $(OBJ)/tb_cl_argon2/Vtb_cl_argon2__pch.h.slow
+	@$(MAKE) -s -C $(OBJ)/tb_cl_argon2 -f Vtb_cl_argon2.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
+	./$(OBJ)/tb_cl_argon2/tb_cl_argon2
+else
+tb_cl_argon2.out: tb_cl_argon2.sv
+	$(IVERILOG) -g2012 -I$(INCDIR) -I$(F1DES) -o $@ $< $(SRC_tb_cl_argon2)
 endif
 
 clean:

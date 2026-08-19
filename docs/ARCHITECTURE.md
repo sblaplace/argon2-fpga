@@ -126,7 +126,7 @@ G so address generation of the next window can later overlap a fill.
 | `argon2_fill_job` | p lanes + AND barrier at each slice |
 | `argon2_addr_gen` (argon2i PRNG) | Two G's in counter mode, 128 J1∥J2 / window |
 | `argon2_axi_mm` / `argon2_fill_axi` | 512-bit AXI4-MM, 16-beat / 1 KiB block, independent R/W |
-| F1 `cl_dram_dma` / `sh_ddr` shell | Not yet |
+| F1 `cl_dram_dma` / `sh_ddr` shell | Scaffold: `fpga/f1/` (`cl_argon2` top + OCL + sync) |
 | Python golden model + RFC 9106 §5 | Passing |
 | Benches + CI (Icarus **and** Verilator) | `blake2b_g`, `blamka_g`, `index`, `compress`, `addr_gen`, 8 KiB fill, RFC 32 KiB / p=4, AXI-MM — all passing |
 
