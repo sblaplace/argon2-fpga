@@ -306,17 +306,26 @@ module tb_cl_argon2 #(
             // Postmortem: read the lane config back through the OCL and
             // peek at each lane's fill FSM state directly.
 `ifndef VERILATOR
+            // Icarus (like most tools) requires constant scope indices in
+            // hierarchical references, so unroll the four lanes.
             for (int L = 0; L < NUM_DDR; L = L + 1) begin
                 logic [31:0] base;
                 logic [31:0] lc, ps, ll, mb;
+                logic [4:0]  fst;
                 base = 32'h40 + (32'(L) * 32'h20);
                 ocl_read(base + 32'h00, lc);
                 ocl_read(base + 32'h04, ps);
                 ocl_read(base + 32'h08, ll);
                 ocl_read(base + 32'h0C, mb);
+                case (L)
+                    0: fst = dut.u_core.lane[0].u_fill.state_o;
+                    1: fst = dut.u_core.lane[1].u_fill.state_o;
+                    2: fst = dut.u_core.lane[2].u_fill.state_o;
+                    3: fst = dut.u_core.lane[3].u_fill.state_o;
+                    default: fst = 5'd31;
+                endcase
                 $display("[dbg] lane%0d LANE_CTRL=%08h PASSES=%08h LEN=%08h BLKS=%08h state=%0d busy=%b done=%b",
-                         L, lc, ps, ll, mb,
-                         dut.u_core.lane[L].u_fill.state_o,
+                         L, lc, ps, ll, mb, fst,
                          dut.u_core.lane_busy[L],
                          dut.u_core.lane_done[L]);
             end
