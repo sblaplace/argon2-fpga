@@ -71,11 +71,13 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       and prefetch the random read. Dest-xor (v1.3, pass > 0) is fetched too.
 - [x] Self-checking benches in `sim/` (G, index, addr-gen, 8 KiB fill KAT,
       RFC 32 KiB / p=4 fill, AXI-MM adapter), running on **both Icarus and
-      Verilator** (`make -C sim`, `make -C sim SIM=verilator`). Workflow YAML
-      is in [`docs/github-ci.yml`](docs/github-ci.yml) (copy to
-      `.github/workflows/ci.yml` to enable Actions).
-- [x] Slice barrier so one job can use p > 1 across cores
-      (`argon2_fill_job`); locked to the RFC 9106 §5 32 KiB vector.
+      Verilator** (`make -C sim`, `make -C sim SIM=verilator`). The active
+      smoke workflow is `.github/workflows/rtl-smoke.yml`; a larger example
+      matrix is retained in [`docs/github-ci.yml`](docs/github-ci.yml).
+- [x] Slice barrier for p > 1 in the shared-memory RTL harness
+      (`argon2_fill_job`); locked to the RFC 9106 §5 32 KiB vector. A real
+      partitioned-memory p=4 CL still needs cross-channel routing for
+      references to other lanes.
 - [x] AXI4-MM adapter (`argon2_axi_mm` / `argon2_fill_axi`): 512-bit,
       16-beat bursts, independent R/W so a prefetch can overlap a write.
 - [x] F1 CL shell scaffold (`fpga/f1/`): `cl_argon2` top mapping the
@@ -102,10 +104,13 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       DDR bandwidth microbench are in [`docs/F1_BRINGUP.md`](docs/F1_BRINGUP.md),
       [`fpga/f1/host/argon2_cl.c`](fpga/f1/host/argon2_cl.c), and
       [`fpga/f1/host/bw_test.c`](fpga/f1/host/bw_test.c) (`fpga/f1/build.sh`).
-- [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling
-      (per `docs/PERFORMANCE.md`, the ceiling per 512-bit @ 200 MHz
-      channel is ~1.07 cand/s — the 0.94/lane argon2i measurement is
-      already within ~12% of it; argon2d 0.59/lane is ref-latency bound).
+- [ ] Scale independent p=1 jobs to N channels; measure cand/s vs. the
+      bandwidth ceiling (per `docs/PERFORMANCE.md`, the ceiling per 512-bit
+      @ 200 MHz channel is ~1.07 cand/s — the 0.94/lane argon2i measurement
+      is already within ~12% of it; argon2d 0.59/lane is ref-latency bound).
+- [ ] Add an owner-channel read crossbar before enabling a single p>1 job
+      across physically partitioned memories; Argon2 references other lanes,
+      so a barrier alone is insufficient.
 
 ## Tree
 

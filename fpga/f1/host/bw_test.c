@@ -73,10 +73,26 @@ static double now_s(void) {
     return ts.tv_sec + ts.tv_nsec*1e-9;
 }
 static uint8_t *sim_mem[4];
-static int attach_fpga(int slot){ (void)slot; for(int i=0;i<4;i++){ if(!sim_mem[i]) sim_mem[i]=calloc(1, 1<<20); } return 0; }
-static int dma_write(int ch, uint64_t addr, const void *b, size_t n){ (void)addr; if(ch>=0&&ch<4&&sim_mem[ch]) memcpy(sim_mem[ch], b, n); return 0; }
-static int dma_read(int ch, uint64_t addr, void *b, size_t n){ (void)addr; if(ch>=0&&ch<4&&sim_mem[ch]) memcpy(b, sim_mem[ch], n); else memset(b,0,n); return 0; }
-static void *ddr_handles[4];
+static size_t sim_cap[4];
+static int attach_fpga(int slot) { (void)slot; return 0; }
+static int dma_write(int ch, uint64_t addr, const void *b, size_t n) {
+    (void)addr;
+    if (ch < 0 || ch >= 4) return EINVAL;
+    if (sim_cap[ch] < n) {
+        uint8_t *grown = realloc(sim_mem[ch], n);
+        if (!grown) return ENOMEM;
+        sim_mem[ch] = grown;
+        sim_cap[ch] = n;
+    }
+    memcpy(sim_mem[ch], b, n);
+    return 0;
+}
+static int dma_read(int ch, uint64_t addr, void *b, size_t n) {
+    (void)addr;
+    if (ch < 0 || ch >= 4 || sim_cap[ch] < n) return EINVAL;
+    memcpy(b, sim_mem[ch], n);
+    return 0;
+}
 #endif
 
 static void usage(const char *a0) {
@@ -218,6 +234,8 @@ int main(int argc, char **argv) {
     free(wbuf); free(rbuf);
 #ifndef SIM_HOST
     for (int i=0;i<nch;i++) fpga_pci_detach(ddr_handles[channels[i]]);
+#else
+    for (int i=0;i<4;i++) free(sim_mem[i]);
 #endif
     return 0;
 }

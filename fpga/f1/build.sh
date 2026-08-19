@@ -76,20 +76,35 @@ dcp() {
 }
 
 host() {
-  echo "== host: SIM_HOST fallback (no SDK needed) =="
-  gcc -DSIM_HOST -O2 -Wall -Wextra -std=c11 "$F1/host/argon2_cl.c" -o /tmp/argon2_cl_sim
-  /tmp/argon2_cl_sim --check-sim-vectors || true
-  gcc -DSIM_HOST -O2 -Wall -Wextra -std=c11 "$F1/host/bw_test.c" -o /tmp/bw_test_sim && echo "bw_test SIM_HOST: OK"
+  echo "== host: generate vectors =="
+  (cd "$ROOT" && python3 -m tests.dump_vectors)
+
+  echo "== host: SIM_HOST smoke tests (no SDK needed) =="
+  gcc -DSIM_HOST -O2 -Wall -Wextra -Werror -std=c11 "$F1/host/argon2_cl.c" -o /tmp/argon2_cl_sim
+  (cd "$ROOT" && /tmp/argon2_cl_sim --check-sim-vectors)
+  (cd "$ROOT" && /tmp/argon2_cl_sim --type i --passes 2 --lane-len 8 \
+    --mem-blocks 8 --init sim/gen/fill_i_init.hex >/dev/null)
+  if /tmp/argon2_cl_sim --lane-len 8 --mem-blocks 32 >/dev/null 2>&1; then
+    echo "argon2_cl accepted an inconsistent p=1 memory geometry" >&2
+    exit 1
+  fi
+  if /tmp/argon2_cl_sim --p4 --lane-len 8 --mem-blocks 32 >/dev/null 2>&1; then
+    echo "argon2_cl accepted p=4 without a cross-channel read router" >&2
+    exit 1
+  fi
+  gcc -DSIM_HOST -O2 -Wall -Wextra -Werror -std=c11 "$F1/host/bw_test.c" -o /tmp/bw_test_sim
+  /tmp/bw_test_sim --all --bytes $((32 * 1024)) --iters 1
+  echo "host SIM_HOST: OK"
 
   if [[ -n "$HDK" && -d "$HDK/sdk/userspace/include" ]]; then
     # shellcheck source=/dev/null
     source "$HDK/sdk_setup.sh" 2>/dev/null || true
     echo "== host: real SDK build =="
-    gcc -O2 -Wall -Wextra -std=c11 \
+    gcc -O2 -Wall -Wextra -Werror -std=c11 \
       -I"$HDK/sdk/userspace/include" \
       "$F1/host/argon2_cl.c" \
       -L"$HDK/sdk/userspace/lib" -lfpga_mgmt -lfpga_pci -o /tmp/argon2_cl && echo "argon2_cl: OK"
-    gcc -O2 -Wall -Wextra -std=c11 \
+    gcc -O2 -Wall -Wextra -Werror -std=c11 \
       -I"$HDK/sdk/userspace/include" \
       "$F1/host/bw_test.c" \
       -L"$HDK/sdk/userspace/lib" -lfpga_mgmt -lfpga_pci -o /tmp/bw_test && echo "bw_test: OK"

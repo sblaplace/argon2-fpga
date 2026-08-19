@@ -84,31 +84,30 @@ static int ocl_read(uint32_t off, uint32_t *val) {
     return rc;
 }
 
-/* DMA the working set into DDR. Each channel owns a private region at
- * base + L * m'*1024. `mem` is an array of m' blocks, each 1024 bytes
- * (128 little-endian 64-bit words, beat 0 low in [63:0]). */
+/* DMA a working-set region at an absolute DDR byte address. The caller
+ * computes the per-lane offset once; keeping that policy out of this helper
+ * avoids the channel offset being applied twice during p=4 readback. `mem`
+ * contains 1024-byte Argon2 blocks (beat 0 low in [63:0]). */
 static int ddr_write_channel(int ch, uint64_t base, const uint8_t *mem, uint32_t mem_blocks) {
     size_t nbytes = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    uint64_t ddr_addr = base + (uint64_t)ch * nbytes;
     /* fpga_pci_dma is slot-indexed; for cl_dram_dma the DDR BARs are
      * exposed as DMA channels. Fall back to P2P poke if DMA not available. */
-    int rc = fpga_pci_dma_write(ddr_handles[ch], ddr_addr, (void*)mem, nbytes);
+    int rc = fpga_pci_dma_write(ddr_handles[ch], base, (void*)mem, nbytes);
     if (rc) {
         fprintf(stderr, "ddr_write ch%d addr=0x%016" PRIx64 " %zu B failed rc=%d\n",
-                ch, ddr_addr, nbytes, rc);
+                ch, base, nbytes, rc);
     } else {
-        printf("  DDR ch%d: wrote %zu B to 0x%016" PRIx64 "\n", ch, nbytes, ddr_addr);
+        printf("  DDR ch%d: wrote %zu B to 0x%016" PRIx64 "\n", ch, nbytes, base);
     }
     return rc;
 }
 
 static int ddr_read_channel(int ch, uint64_t base, uint8_t *mem, uint32_t mem_blocks) {
     size_t nbytes = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    uint64_t ddr_addr = base + (uint64_t)ch * nbytes;
-    int rc = fpga_pci_dma_read(ddr_handles[ch], ddr_addr, mem, nbytes);
+    int rc = fpga_pci_dma_read(ddr_handles[ch], base, mem, nbytes);
     if (rc) {
         fprintf(stderr, "ddr_read ch%d addr=0x%016" PRIx64 " %zu B failed rc=%d\n",
-                ch, ddr_addr, nbytes, rc);
+                ch, base, nbytes, rc);
     }
     return rc;
 }
@@ -143,6 +142,7 @@ static int attach_fpga(int slot) {
  * when compiled with -DSIM_HOST. */
 static uint32_t sim_regf[64];
 static uint8_t *sim_ddr[A2_NUM_DDR];
+static size_t sim_ddr_cap[A2_NUM_DDR];
 static uint32_t sim_status_busy = 0, sim_status_done = 0;
 
 static int ocl_write(uint32_t off, uint32_t val) {
@@ -186,7 +186,12 @@ static int ocl_read(uint32_t off, uint32_t *val) {
 static int ddr_write_channel(int ch, uint64_t base, const uint8_t *mem, uint32_t mem_blocks) {
     (void)base;
     size_t n = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    if (!sim_ddr[ch]) sim_ddr[ch] = calloc(1, 1<<20);
+    if (sim_ddr_cap[ch] < n) {
+        uint8_t *grown = realloc(sim_ddr[ch], n);
+        if (!grown) return ENOMEM;
+        sim_ddr[ch] = grown;
+        sim_ddr_cap[ch] = n;
+    }
     memcpy(sim_ddr[ch], mem, n);
     printf("[SIM] DDR ch%d write %zu B\n", ch, n);
     return 0;
@@ -194,11 +199,22 @@ static int ddr_write_channel(int ch, uint64_t base, const uint8_t *mem, uint32_t
 static int ddr_read_channel(int ch, uint64_t base, uint8_t *mem, uint32_t mem_blocks) {
     (void)base;
     size_t n = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    if (!sim_ddr[ch]) memset(mem, 0, n);
-    else memcpy(mem, sim_ddr[ch], n);
+    if (sim_ddr_cap[ch] < n) return EINVAL;
+    memcpy(mem, sim_ddr[ch], n);
     return 0;
 }
-static int attach_fpga(int slot) { (void)slot; memset(sim_regf, 0, sizeof sim_regf); sim_status_busy=0; sim_status_done=0; for(int i=0;i<4;i++){ if(sim_ddr[i]){free(sim_ddr[i]); sim_ddr[i]=NULL;}} return 0; }
+static int attach_fpga(int slot) {
+    (void)slot;
+    memset(sim_regf, 0, sizeof sim_regf);
+    sim_status_busy = 0;
+    sim_status_done = 0;
+    for (int i=0; i<4; i++) {
+        free(sim_ddr[i]);
+        sim_ddr[i] = NULL;
+        sim_ddr_cap[i] = 0;
+    }
+    return 0;
+}
 #endif
 
 /* ---- OCL programming ---- */
@@ -253,7 +269,7 @@ static int run_and_poll(int expect_done_mask, int timeout_ms) {
     return 0;
 }
 
-/* ---- hex file helpers (same format as sim/gen/*.hex) ---- */
+/* ---- hex file helpers (same format as generated simulation .hex files) ---- */
 
 static uint8_t *load_hex(const char *path, size_t *out_bytes) {
     struct stat st;
@@ -423,11 +439,16 @@ int main(int argc, char **argv) {
 #ifdef SIM_HOST
     if (check_sim) {
         printf("SIM_HOST: checking sim/gen vectors via host model\n");
-        size_t n;
-        uint8_t *init = load_hex("sim/gen/fill_i_init.hex", &n);
-        uint8_t *exp  = load_hex("sim/gen/fill_i_exp.hex", &n);
-        if (!init || !exp) return 1;
-        printf("SIM_HOST: init %zu B, exp %zu B — vector I/O OK\n", n, n);
+        size_t init_n, exp_n;
+        uint8_t *init = load_hex("sim/gen/fill_i_init.hex", &init_n);
+        uint8_t *exp  = load_hex("sim/gen/fill_i_exp.hex", &exp_n);
+        if (!init || !exp) { free(init); free(exp); return 1; }
+        if (init_n != exp_n) {
+            fprintf(stderr, "SIM_HOST: vector size mismatch (%zu init vs %zu expected)\n",
+                    init_n, exp_n);
+            free(init); free(exp); return 1;
+        }
+        printf("SIM_HOST: init %zu B, exp %zu B — vector I/O OK\n", init_n, exp_n);
         free(init); free(exp);
         printf("SIM_HOST PASS (vectors readable)\n");
         return 0;
@@ -436,6 +457,49 @@ int main(int argc, char **argv) {
 
     if (check_sim && init_path == NULL) {
         /* Convenience: --check-sim-vectors without args still does the above */
+    }
+
+    /* Reject configurations that would otherwise underflow index arithmetic,
+     * issue unaligned block bursts, or leave p=4 lanes deadlocked at a slice
+     * barrier. The CL register interface is intentionally small, so the host
+     * is the first line of defence against malformed jobs. */
+    if (channel < -1 || channel >= (int)A2_NUM_DDR) {
+        fprintf(stderr, "--channel must be 0..%d\n", A2_NUM_DDR - 1);
+        return 2;
+    }
+    if (p4_mode && channel >= 0) {
+        fprintf(stderr, "--p4 uses all four channels and cannot be combined with --channel\n");
+        return 2;
+    }
+    if (p4_mode) {
+        fprintf(stderr,
+                "--p4 is not supported by the current F1 CL: Argon2 references "
+                "blocks across lanes, but the CL has no cross-channel read router\n");
+        return 2;
+    }
+    if (passes == 0) {
+        fprintf(stderr, "--passes must be at least 1\n");
+        return 2;
+    }
+    if (lane_len < 8 || (lane_len & 3u) != 0) {
+        fprintf(stderr, "--lane-len must be at least 8 and a multiple of 4\n");
+        return 2;
+    }
+    uint64_t expected_blocks = (uint64_t)lane_len * (p4_mode ? A2_NUM_DDR : 1u);
+    if ((uint64_t)mem_blocks != expected_blocks) {
+        fprintf(stderr, "--mem-blocks must equal lane_len * lanes (%" PRIu64
+                        " for this %s job)\n",
+                expected_blocks, p4_mode ? "p=4" : "p=1");
+        return 2;
+    }
+    if ((base & (A2_BLOCK_BYTES - 1u)) != 0) {
+        fprintf(stderr, "--base must be aligned to a %u-byte Argon2 block\n",
+                A2_BLOCK_BYTES);
+        return 2;
+    }
+    if (timeout_ms <= 0) {
+        fprintf(stderr, "--timeout must be greater than zero\n");
+        return 2;
     }
 
     printf("argon2_cl: type=%s (%u) passes=%u lane_len=%u mem_blocks=%u base=0x%016" PRIx64 " %s\n",
@@ -452,11 +516,10 @@ int main(int argc, char **argv) {
         if (!init_mem) return 1;
         size_t expect_bytes = (size_t)mem_blocks * A2_BLOCK_BYTES;
         if (init_bytes != expect_bytes) {
-            fprintf(stderr, "init file %s is %zu B but mem_blocks %u -> %zu B\n",
+            fprintf(stderr, "init file %s is %zu B but mem_blocks %u requires %zu B\n",
                     init_path, init_bytes, mem_blocks, expect_bytes);
-            /* Allow init to be per-lane vs. whole: if file is lane_len*1024
-             * and p4_mode lanse, replicate across lanes by the caller. For
-             * now just warn. */
+            free(init_mem);
+            return 2;
         }
     }
 
@@ -465,45 +528,26 @@ int main(int argc, char **argv) {
     rc = ocl_write(A2_OCL_CONTROL, control);
     if (rc) return 1;
 
-    int lanes_to_program;
-    uint32_t lanes_field; /* informational, stored in LANE_CTRL[15:8] */
-    if (p4_mode) { lanes_to_program = 4; lanes_field = 4; }
-    else if (channel >= 0) { lanes_to_program = 1; lanes_field = 1; }
-    else { lanes_to_program = 4; lanes_field = 1; }
-
-    /* DMA preload */
+    /* DMA preload. Address policy mirrors the BASE programmed below:
+     * independent jobs occupy m'-block regions, while a p=4 job is split
+     * into four q-block lane regions. */
     if (init_mem) {
-        if (p4_mode || channel < 0) {
-            for (int L = 0; L < 4; L++) {
-                /* In p4_mode the init file is the whole working set;
-                 * the CL expects each DDR to hold one lane's slice.
-                 * Tests use per-lane duplication; handle both. */
-                uint64_t lbase = base + (uint64_t)L * (size_t)mem_blocks * A2_BLOCK_BYTES / (p4_mode ? 4 : 1);
-                /* For the 8 KiB p=1 case, init_mem is 8 blocks; each lane
-                 * gets the same 8 blocks. For the 32 KiB p=4 case, init is
-                 * 32 blocks; lane L gets blocks [L*q .. (L+1)*q). */
-                const uint8_t *src = init_mem;
-                if (init_bytes == (size_t)mem_blocks * A2_BLOCK_BYTES && p4_mode) {
-                    src = init_mem + (size_t)L * lane_len * A2_BLOCK_BYTES;
-                    /* DMA only lane_len blocks per lane in p4_mode */
-                    int r = ddr_write_channel(L, lbase, src, lane_len);
-                    if (r) return 1;
-                } else {
-                    int r = ddr_write_channel(L, base, init_mem, mem_blocks);
-                    if (r) return 1;
-                    break; /* one write covered all when not splitting */
-                }
+        if (p4_mode) {
+            for (int L = 0; L < (int)A2_NUM_DDR; L++) {
+                uint64_t lbase = base + (uint64_t)L * lane_len * A2_BLOCK_BYTES;
+                const uint8_t *src = init_mem + (size_t)L * lane_len * A2_BLOCK_BYTES;
+                int r = ddr_write_channel(L, lbase, src, lane_len);
+                if (r) return 1;
             }
-            /* When we broke early (non-split init), need to duplicate to other lanes */
-            if (init_bytes == (size_t)mem_blocks * A2_BLOCK_BYTES && !p4_mode && channel < 0) {
-                for (int L = 1; L < lanes_to_program; L++) {
-                    int r = ddr_write_channel(L, base, init_mem, mem_blocks);
-                    if (r) return 1;
-                }
-            }
-        } else {
+        } else if (channel >= 0) {
             int r = ddr_write_channel(channel, base, init_mem, mem_blocks);
             if (r) return 1;
+        } else {
+            for (int L = 0; L < (int)A2_NUM_DDR; L++) {
+                uint64_t lbase = base + (uint64_t)L * mem_blocks * A2_BLOCK_BYTES;
+                int r = ddr_write_channel(L, lbase, init_mem, mem_blocks);
+                if (r) return 1;
+            }
         }
     }
 
@@ -513,7 +557,6 @@ int main(int argc, char **argv) {
             uint64_t lbase = base; /* all lanes share the same job base; CL adds lane stride */
             /* In p4_mode each lane's BASE is the start of the whole working set;
              * the CL's per-lane offset is lane_id * lane_length blocks. */
-            (void)lanes_field;
             rc = program_lane(L, type_i, passes, lane_len, mem_blocks, lbase);
             if (rc) return 1;
         }

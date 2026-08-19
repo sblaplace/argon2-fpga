@@ -7,11 +7,12 @@
 //   out = Z ⊕ R  [⊕ dest if with_xor, i.e. pass > 0]
 //
 // Blocks stream as 16 beats × 512 bits. N_P permutation units run in
-// parallel; the 16 P applications are issued in waves of N_P (N_P must
-// divide 16: 1, 2, 4, 8 or 16). Rows of a wave are mutually independent,
-// as are columns, and every column wave reads only blk words written by
-// the row wave, so parallelism does not change the result for any N_P —
-// only the cycle count:
+// parallel; the 16 P applications are issued in waves of N_P. N_P must be
+// 1, 2, 4, or 8: every wave must stay wholly within either the eight row
+// permutations or the eight column permutations. Columns read the completed
+// row result, so N_P=16 would incorrectly launch both phases together.
+// Parallelism does not change the result for any supported N_P — only the
+// cycle count:
 //
 //   N_P = 1  -> 16 waves × ~9 cycles ≈ 160 cycles of compute per block
 //   N_P = 8  ->  2 waves × ~9 cycles ≈  18 cycles
@@ -42,6 +43,14 @@ module argon2_compress #(
 );
     localparam int WORDS = 128;
     localparam int WPB   = 8;
+
+    // The scheduler advances by N_P and relies on a wave boundary exactly
+    // between row groups 0..7 and column groups 8..15. Fail at elaboration
+    // instead of silently producing a plausible-looking wrong hash.
+    initial begin : validate_parameters
+        if (!(N_P == 1 || N_P == 2 || N_P == 4 || N_P == 8))
+            $fatal(1, "argon2_compress: N_P must be one of 1, 2, 4, or 8 (got %0d)", N_P);
+    end
 
     typedef enum logic [2:0] { LOAD, KICK, WAIT_P, DRAIN } state_t;
     state_t state;
