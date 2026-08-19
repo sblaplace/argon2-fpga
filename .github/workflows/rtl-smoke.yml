@@ -1,0 +1,42 @@
+# rtl-smoke
+#
+# RTL smoke testbench harness. Installs Icarus Verilog on a hosted Linux
+# runner and runs every self-checking testbench under hdl/ via
+# scripts/run_tb.py. That runner fails unless each testbench (a) compiles and
+# runs cleanly AND (b) prints the "PASS" marker — so this stays green only
+# when the RTL is genuinely self-verified, not silently empty.
+#
+# Gated on pull_request to main and pushes to main. This is the smallest CI
+# slice that is meaningful at the README-only stage; as real RTL lands, add
+# per-IP testbench jobs and Vivado synthesis/build jobs here, and consider
+# pinning the iverilog version.
+
+name: rtl-smoke
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  testbenches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog
+          iverilog -V
+
+      - name: Run self-checking testbenches
+        run: python3 scripts/run_tb.py
+
+      - name: Show compile logs on failure
+        if: failure()
+        run: |
+          echo "Look under /tmp/rlt_smoke_* for compile.log / sim.log"
+          find /tmp -maxdepth 1 -name 'rl*smoke*' -type d 2>/dev/null
