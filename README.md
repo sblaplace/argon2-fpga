@@ -85,14 +85,17 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       DDR4-2400 timing model (`sim/tb_ddr4_ram.sv`, `make -C sim perf`) —
       and it turned out compute-bound, not memory-bound. Fixes (parallel-P
       compression `N_P`, write-through prev cache, early dest-xor read,
-      dest streaming) took it from **0.21 → 0.93 cand/s per lane**
-      (t=3, 1 GiB, 200 MHz), i.e. **~3.7 cand/s on a 4-channel f1.2xlarge**,
-      with the DDR port less than half busy. Numbers, sweep table, and
-      remaining headroom: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
-      The same work flushed out four latent CL bugs (broken file list,
-      missing `rready` in the local `axi_bus_t`, a byte-addressing bug in
-      the OCL slave, unlatched `done`) — the 4-channel `tb_cl_argon2`
-      bench now passes on Verilator as well as Icarus.
+      dest streaming, **32-deep streaming write FIFO**) took it from
+      **0.21 → 0.94 cand/s per lane** (t=3, 1 GiB, 200 MHz, argon2i),
+      i.e. **~3.75 cand/s on a 4-channel f1.2xlarge**, with the DDR port
+      48% busy (IDEAL floor 62.3 cyc/blk → 1.02 cand/s). Type sweep:
+      argon2d ~0.59/lane, argon2id ~0.63/lane (ref-latency bound, no
+      prefetch). Numbers, sweep tables, and remaining headroom:
+      [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). The same work flushed
+      out four latent CL bugs (broken file list, missing `rready` in the
+      local `axi_bus_t`, a byte-addressing bug in the OCL slave,
+      unlatched `done`) — the 4-channel `tb_cl_argon2` bench now passes
+      on Verilator as well as Icarus.
 - [ ] AWS F1 hello-world: build the shell, run the 32 KiB RFC vector on a
       single DDR4 port (sim KAT already exists), then `cl_dram_dma`
       multi-channel bandwidth. Bring-up checklist, host driver, and
@@ -101,8 +104,8 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       [`fpga/f1/host/bw_test.c`](fpga/f1/host/bw_test.c) (`fpga/f1/build.sh`).
 - [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling
       (per `docs/PERFORMANCE.md`, the ceiling per 512-bit @ 200 MHz
-      channel is ~1.07 cand/s — the 0.93/lane measurement is already
-      within ~15% of it).
+      channel is ~1.07 cand/s — the 0.94/lane argon2i measurement is
+      already within ~12% of it; argon2d 0.59/lane is ref-latency bound).
 
 ## Tree
 

@@ -31,7 +31,8 @@ module tb_perf #(
     parameter int NBLK   = 4096,   // working set in 1 KiB blocks (m')
     parameter int PASSES = 3,      // time cost t
     parameter int N_P    = 1,      // parallel P units in the compression G
-    parameter int IDEAL_WR = 0     // experiment: DDR model with instant writes
+    parameter int IDEAL_WR = 0,    // experiment: DDR model with instant writes
+    parameter int TYPE_I = 1       // 0=d, 1=i, 2=id
 ) (
 );
     localparam int NBEAT  = 16;
@@ -143,7 +144,7 @@ module tb_perf #(
         .clk(clk), .rst_n(rst_n),
         .start(a_start), .busy(a_busy), .done(a_done),
         .passes(PASSES), .lanes(1), .lane_id(0),
-        .lane_length(NBLK), .memory_blocks(NBLK), .type_i(2'd1),
+        .lane_length(NBLK), .memory_blocks(NBLK), .type_i(2'(TYPE_I)),
         .sync_req(), .sync_ack(1'b1),
         .base_addr(64'd0),
         .state_o(a_state),
@@ -166,7 +167,7 @@ module tb_perf #(
         .clk(clk), .rst_n(rst_n),
         .start(b_start), .busy(b_busy), .done(b_done),
         .passes(PASSES), .lanes(1), .lane_id(0),
-        .lane_length(NBLK), .memory_blocks(NBLK), .type_i(2'd1),
+        .lane_length(NBLK), .memory_blocks(NBLK), .type_i(2'(TYPE_I)),
         .sync_req(), .sync_ack(1'b1),
         .base_addr(64'd0),
         .state_o(b_state),
@@ -267,8 +268,9 @@ module tb_perf #(
         rst_n = 1'b1;
         repeat (4) @(posedge clk);
 
-        $display("tb_perf: m'=%0d blocks (%0d MiB), t=%0d, argon2i, p=1, 200 MHz",
-                 NBLK, (NBLK >> 10), PASSES);
+        $display("tb_perf: m'=%0d blocks (%0d MiB), t=%0d, type=%0d (%s), p=1, 200 MHz, N_P=%0d",
+                 NBLK, (NBLK >> 10), PASSES, TYPE_I,
+                 (TYPE_I==0)?"argon2d":(TYPE_I==1)?"argon2i":"argon2id", N_P);
 
         // Phase A: ideal memory
         run_job(a_start, a_busy, a_done, i_cyc0, i_cyc1);
