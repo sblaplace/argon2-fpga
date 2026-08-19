@@ -7,14 +7,14 @@ Runs the real verification suites and requires BOTH:
   2. the literal marker "PASS" in the simulation output.
 
 The PASS-marker requirement is the forcing function: a testbench that
-finishes without asserting all its vectors (e.g. a silent early $finish, or a
-testbench that never checks anything) still fails CI.
+finishes without asserting all its vectors (e.g. a silent early $finish, or
+a testbench that never checks anything) still fails CI.
 
 Suites:
-  * sim/  — `make -C sim` (Icarus) and `make -C sim cl`: the eight unit
-    benches (blake2b G, BlaMka, index, compress, addr-gen, fill, RFC p=4
-    fill, AXI-MM) plus the 4-channel F1 CL top bench tb_cl_argon2.
-    This is the suite the CL bugs used to rot behind — run it.
+  * sim/  — the Icarus targets, one make invocation PER BENCH with its own
+    timeout and process-group kill, so a stall is named by the last target
+    started instead of wedging the whole job: blake2b, blamka, index,
+    compress, addr, fill, rfc, axi, cl (the 4-channel F1 CL top bench).
   * hdl/ — any legacy tb_*.v / *_tb.v benches found there (kept for
     backwards compatibility).
 
@@ -23,13 +23,19 @@ Exit: 0 if all testbenches pass, 1 otherwise.
 """
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HDL_DIR = os.path.join(ROOT, "hdl")
 SIM_DIR = os.path.join(ROOT, "sim")
 PASS_MARKER = "PASS"
+
+SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
+               "fill", "rfc", "axi", "cl"]
+PER_TARGET_TIMEOUT = 300  # seconds; any bench here finishes in <30 s
 
 
 def find_testbenches(hdl_dir):
@@ -41,37 +47,25 @@ def find_testbenches(hdl_dir):
     return sorted(tbs)
 
 
-def check_output(label, cp, require_pass):
-    """Print a subprocess result and return ok."""
-    out = (cp.stdout or "") + (cp.stderr or "")
-    print(out.rstrip())
-    if cp.returncode != 0:
-        print(f"[FAIL] {label}: exit code {cp.returncode}\n")
-        return False
-    if require_pass and PASS_MARKER not in out:
-        print(f"[FAIL] {label}: output did not contain '{PASS_MARKER}'\n")
-        return False
-    print(f"[OK]   {label}\n")
-    return True
-
-
 def run_streaming(cmd, cwd, timeout, label, require_pass):
-    """Run a command, streaming its output live (so CI logs show exactly
-    which bench stalls), and kill the whole process GROUP on timeout —
-    a hung grandchild (vvp under make) would otherwise wedge the job."""
-    import os
-    import signal
-
+    """Run a command, streaming its output live, and kill the whole
+    process GROUP on timeout (a hung grandchild under make — e.g. vvp —
+    would otherwise outlive make and wedge the job)."""
     buf = []
+
+    def reader(stream):
+        for line in stream:
+            buf.append(line)
+            print(line, end="", flush=True)
+
     print(f"[run] {' '.join(cmd)}\n", flush=True)
     with subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, start_new_session=True,
     ) as proc:
+        t = threading.Thread(target=reader, args=(proc.stdout,), daemon=True)
+        t.start()
         try:
-            for line in proc.stdout:
-                buf.append(line)
-                print(line, end="", flush=True)
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             print(f"\n[FAIL] {label}: timed out after {timeout}s — killing "
@@ -81,7 +75,9 @@ def run_streaming(cmd, cwd, timeout, label, require_pass):
             except OSError:
                 proc.kill()
             proc.wait()
+            t.join(timeout=5)
             return False
+        t.join(timeout=5)
     out = "".join(buf)
     if rc != 0:
         print(f"\n[FAIL] {label}: exit code {rc}\n")
@@ -97,17 +93,17 @@ def run_sim_suite():
     ok = True
     if not os.path.isdir(SIM_DIR):
         return ok
-    # Unit benches + RFC p=4 + AXI (Icarus). Explicit `all`: the Makefile's
-    # first rule is the perf bench, and a bare `make` used to pick that up.
-    ok &= run_streaming(
-        ["make", "-C", SIM_DIR, "all"], cwd=ROOT, timeout=1200,
-        label="sim: make -C sim all (all benches)", require_pass=True,
-    )
-    # 4-channel F1 CL top bench.
-    ok &= run_streaming(
-        ["make", "-C", SIM_DIR, "cl"], cwd=ROOT, timeout=1200,
-        label="sim: make -C sim cl (tb_cl_argon2)", require_pass=True,
-    )
+    # One make per bench: a compile error, missing-PASS, or stall is
+    # attributed to the exact bench, and a stall can't block the rest of
+    # the job for more than the per-target timeout. (A bare `make -C sim`
+    # would also pick the Makefile's first rule — the perf bench — as the
+    # default goal.)
+    for tgt in SIM_TARGETS:
+        ok &= run_streaming(
+            ["make", "-C", SIM_DIR, tgt], cwd=ROOT,
+            timeout=PER_TARGET_TIMEOUT,
+            label=f"sim: make -C sim {tgt}", require_pass=True,
+        )
     return ok
 
 
@@ -132,14 +128,20 @@ def run_legacy_hdl():
              "-o", binary, tb],
             cwd=HDL_DIR, capture_output=True, text=True, timeout=120,
         )
-        if not check_output(f"{rel} (compile)", cp, require_pass=False):
+        if cp.returncode != 0:
+            print((cp.stdout or "") + (cp.stderr or ""))
+            print(f"[FAIL] {rel} (compile): exit code {cp.returncode}\n")
             ok = False
             continue
-        cp = subprocess.run(
-            [vvp, binary], cwd=HDL_DIR, capture_output=True, text=True,
-            timeout=120,
-        )
-        ok &= check_output(f"{rel} (run)", cp, require_pass=True)
+        cp = subprocess.run([vvp, binary], cwd=HDL_DIR,
+                            capture_output=True, text=True, timeout=120)
+        out = (cp.stdout or "") + (cp.stderr or "")
+        print(out.rstrip())
+        if cp.returncode != 0 or PASS_MARKER not in out:
+            print(f"[FAIL] {rel} (run)\n")
+            ok = False
+        else:
+            print(f"[OK]   {rel} (run)\n")
     return ok
 
 
