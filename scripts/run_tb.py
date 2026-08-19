@@ -35,7 +35,15 @@ PASS_MARKER = "PASS"
 
 SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
                "fill", "rfc", "axi", "cl"]
-PER_TARGET_TIMEOUT = 300  # seconds; any bench here finishes in <30 s
+PER_TARGET_TIMEOUT = 120  # seconds; any bench here finishes in <30 s
+
+
+def gh_annotation(level, title, message):
+    """Emit a workflow command annotation. Annotations are retrievable
+    through the API even when the raw log download is not."""
+    safe_t = title.replace(",", "%2C")
+    safe_m = message.replace("\r", "").replace("\n", "%0A").replace(",", "%2C")
+    print(f"::{level} title={safe_t}::{safe_m}", flush=True)
 
 
 def find_testbenches(hdl_dir):
@@ -76,14 +84,21 @@ def run_streaming(cmd, cwd, timeout, label, require_pass):
                 proc.kill()
             proc.wait()
             t.join(timeout=5)
+            gh_annotation("error", f"STALL: {label}",
+                          "timed out after %ds; output tail:\n%s"
+                          % (timeout, "".join(buf[-20:])[-800:]))
             return False
         t.join(timeout=5)
     out = "".join(buf)
     if rc != 0:
         print(f"\n[FAIL] {label}: exit code {rc}\n")
+        gh_annotation("error", f"EXIT {rc}: {label}",
+                      out[-800:])
         return False
     if require_pass and PASS_MARKER not in out:
         print(f"\n[FAIL] {label}: output did not contain '{PASS_MARKER}'\n")
+        gh_annotation("error", f"NO-PASS: {label}",
+                      out[-800:])
         return False
     print(f"\n[OK]   {label}\n")
     return True
