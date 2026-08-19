@@ -3,7 +3,9 @@
 // Same vectors as tb_argon2_fill; the adapter must be bit-identical.
 `timescale 1ns / 1ps
 
-module tb_argon2_axi;
+module tb_argon2_axi #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     localparam int NBLK   = 8;
     localparam int NBEAT  = 16;
     localparam int ADDR_W = 64;

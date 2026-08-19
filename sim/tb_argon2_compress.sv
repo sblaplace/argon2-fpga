@@ -3,14 +3,16 @@
 `timescale 1ns / 1ps
 `include "blake2b_pkg.svh"
 
-module tb_argon2_compress;
+module tb_argon2_compress #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     logic         clk, rst_n;
     logic         in_valid, in_ready, in_last, with_xor;
     logic [511:0] in_x, in_y, in_dest;
     logic         out_valid, out_ready, out_last;
     logic [511:0] out_data;
 
-    argon2_compress dut (
+    argon2_compress #(.N_P(N_P)) dut (
         .clk(clk), .rst_n(rst_n),
         .in_valid(in_valid), .in_ready(in_ready),
         .in_x(in_x), .in_y(in_y), .in_last(in_last),

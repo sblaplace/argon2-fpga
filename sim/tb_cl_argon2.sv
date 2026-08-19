@@ -15,7 +15,9 @@
 
 `include "cl_argon2_axi_if.sv"
 
-module tb_cl_argon2;
+module tb_cl_argon2 #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     localparam int NUM_DDR = 4;
     localparam int NBLK   = 8;
     localparam int NBEAT  = 16;
@@ -72,7 +74,7 @@ module tb_cl_argon2;
     axi_bus_t ddr0 (), ddr1 (), ddr2 (), ddr3 ();
 
     // ---- DUT ------------------------------------------------------------
-    cl_argon2 dut (
+    cl_argon2 #(.N_P(N_P)) dut (
         .clk_main_a0      (clk),
         .rst_main_n       (rst_main_n),
         .sh_cl_flr_assert (sh_cl_flr_assert),
@@ -164,7 +166,7 @@ module tb_cl_argon2;
                 @(posedge clk); sh_ocl_awvalid = 1'b0;
             end
             begin
-                sh_ocl_wvalid = 1'b1; sh_ocl_wdata = data; sh_ocl_wstrb = 16'h000F;
+                sh_ocl_wvalid = 1'b1; sh_ocl_wdata = data; sh_ocl_wstrb = 16'hFFFF;
                 while (!(sh_ocl_wvalid && sh_ocl_wready)) @(posedge clk);
                 @(posedge clk); sh_ocl_wvalid = 1'b0;
             end

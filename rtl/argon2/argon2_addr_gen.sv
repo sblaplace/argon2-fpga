@@ -14,7 +14,9 @@
 
 `timescale 1ns / 1ps
 
-module argon2_addr_gen (
+module argon2_addr_gen #(
+    parameter int N_P = 1   // parallel P units in the compression G
+) (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -54,7 +56,7 @@ module argon2_addr_gen (
     logic         c_out_valid, c_out_ready, c_out_last;
     logic [511:0] c_out_data;
 
-    argon2_compress u_g (
+    argon2_compress #(.N_P(N_P)) u_g (
         .clk      (clk),
         .rst_n    (rst_n),
         .in_valid (c_in_valid),

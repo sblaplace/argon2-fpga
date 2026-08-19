@@ -2,7 +2,9 @@
 // Combinational checks for index_alpha / ref_area vs. tests/test_index.py.
 `timescale 1ns / 1ps
 
-module tb_argon2_index;
+module tb_argon2_index #(
+    parameter int N_P = 1   // unused: uniform -GN_P sweep across benches
+);
     logic [31:0] pass, slice, index, lane_length, segment_length, j1;
     logic        same_lane;
     logic [31:0] ref_area, start_pos, z;

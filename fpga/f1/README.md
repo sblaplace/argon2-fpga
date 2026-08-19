@@ -79,6 +79,14 @@ register file is word-indexed internally (lane L's `LANE_CTRL` is word
    aws_build_dcp_from_cl -foreground
    ```
 
+`cl_argon2` and `cl_argon2_core` take an `N_P` parameter (parallel P
+units per compression G). Default 1 is the small core; build with
+`N_P = 8` for the performance point measured in
+[`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md) (~0.93 cand/s/lane at
+200 MHz; ~8× the DSPs of N_P=1, still ~2 kDSP for all four lanes on a
+VU9P). The full KAT suite runs at both points
+(`make -C sim SIM=verilator NP=8 all cl`).
+
 ## First bring-up (the next step)
 
 Per `docs/ARCHITECTURE.md` step 3, bring it up in this order:

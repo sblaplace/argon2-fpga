@@ -4,7 +4,9 @@
 // working set and join at each slice barrier.
 `timescale 1ns / 1ps
 
-module tb_argon2_fill_rfc;
+module tb_argon2_fill_rfc #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     localparam int NBLK   = 32;
     localparam int NBEAT  = 16;
     localparam int P      = 4;
@@ -22,7 +24,7 @@ module tb_argon2_fill_rfc;
     logic [P-1:0][ADDR_W-1:0] mem_wr_addr;
     logic [P-1:0][511:0]      mem_wr_data;
 
-    argon2_fill_job #(.ADDR_W(ADDR_W), .LANES(P)) dut (
+    argon2_fill_job #(.ADDR_W(ADDR_W), .LANES(P), .N_P(N_P)) dut (
         .clk(clk), .rst_n(rst_n),
         .start(start), .busy(busy), .done(done),
         .passes(passes), .lane_length(lane_length),

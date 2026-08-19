@@ -55,6 +55,7 @@ interface axi_bus_t;
     logic [1:0]  rresp;
     logic         rlast;
     logic         rvalid;
+    logic         rready;
 endinterface
 
 `endif

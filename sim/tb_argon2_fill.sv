@@ -5,7 +5,9 @@
 // empty first segment (q/4 == 2).
 `timescale 1ns / 1ps
 
-module tb_argon2_fill;
+module tb_argon2_fill #(
+    parameter int N_P = 1   // parallel P units in the compression G
+);
     localparam int NBLK   = 8;
     localparam int NBEAT  = 16;
     localparam int RD_LAT = 12;
@@ -22,7 +24,7 @@ module tb_argon2_fill;
     logic [ADDR_W-1:0] mem_wr_addr;
     logic [511:0]      mem_wr_data;
 
-    argon2_fill_ctrl #(.ADDR_W(ADDR_W)) dut (
+    argon2_fill_ctrl #(.ADDR_W(ADDR_W), .N_P(N_P)) dut (
         .clk(clk), .rst_n(rst_n),
         .start(start), .busy(busy), .done(done),
         .passes(passes), .lanes(lanes), .lane_id(lane_id),

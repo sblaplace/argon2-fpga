@@ -81,13 +81,28 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
 - [x] F1 CL shell scaffold (`fpga/f1/`): `cl_argon2` top mapping the
       `cl_dram_dma` port list onto 4× `argon2_fill_axi` + an OCL register
       slave + a p=4 slice-sync barrier. See `fpga/f1/README.md`.
+- [x] Performance model: the core was **measured** against a cycle-accurate
+      DDR4-2400 timing model (`sim/tb_ddr4_ram.sv`, `make -C sim perf`) —
+      and it turned out compute-bound, not memory-bound. Fixes (parallel-P
+      compression `N_P`, write-through prev cache, early dest-xor read,
+      dest streaming) took it from **0.21 → 0.93 cand/s per lane**
+      (t=3, 1 GiB, 200 MHz), i.e. **~3.7 cand/s on a 4-channel f1.2xlarge**,
+      with the DDR port less than half busy. Numbers, sweep table, and
+      remaining headroom: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+      The same work flushed out four latent CL bugs (broken file list,
+      missing `rready` in the local `axi_bus_t`, a byte-addressing bug in
+      the OCL slave, unlatched `done`) — the 4-channel `tb_cl_argon2`
+      bench now passes on Verilator as well as Icarus.
 - [ ] AWS F1 hello-world: build the shell, run the 32 KiB RFC vector on a
       single DDR4 port (sim KAT already exists), then `cl_dram_dma`
       multi-channel bandwidth. Bring-up checklist, host driver, and
       DDR bandwidth microbench are in [`docs/F1_BRINGUP.md`](docs/F1_BRINGUP.md),
       [`fpga/f1/host/argon2_cl.c`](fpga/f1/host/argon2_cl.c), and
       [`fpga/f1/host/bw_test.c`](fpga/f1/host/bw_test.c) (`fpga/f1/build.sh`).
-- [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling.
+- [ ] Scale to N channels; measure cand/s vs. the bandwidth ceiling
+      (per `docs/PERFORMANCE.md`, the ceiling per 512-bit @ 200 MHz
+      channel is ~1.07 cand/s — the 0.93/lane measurement is already
+      within ~15% of it).
 
 ## Tree
 
@@ -103,8 +118,11 @@ tests/                unittest against RFC 9106 §5
 ## Verify
 
 ```
-make test                 # RFC 7693 + RFC 9106 §5, no simulator needed
-make -C sim               # Icarus self-checks (needs iverilog)
+make test                              # RFC 7693 + RFC 9106 §5, no simulator needed
+make -C sim                            # Icarus self-checks (needs iverilog)
+make -C sim SIM=verilator              # same benches on Verilator
+make -C sim SIM=verilator NP=8 all cl  # whole suite at the parallel-P point
+make -C sim SIM=verilator NP=8 perf    # cand/s vs. DDR4 timing model
 ```
 
 ## References

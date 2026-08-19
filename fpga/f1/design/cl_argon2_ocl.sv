@@ -49,6 +49,9 @@ module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
     input  logic [NREG-1:0] reg_in_sel         // 1 => read returns reg_in
 );
 
+    // The OCL bus is byte-addressed, 32 bits per word: word index is the
+    // byte address shifted right by 2. aw_addr/ar_addr are captured from
+    // awaddr/araddr, so index the register file with bits [AW+1:2].
     localparam int AW = $clog2(NREG);   // word index width
 
     // ----- write channel -----
@@ -83,8 +86,8 @@ module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
             if (commit) begin
                 for (int b = 0; b < 4; b++)
                     if (w_strb[b])
-                        regf[aw_addr[AW-1:0]][b*8 +: 8] <= w_data[b*8 +: 8];
-                reg_wr[aw_addr[AW-1:0]] <= 1'b1;
+                        regf[aw_addr[AW+1:2]][b*8 +: 8] <= w_data[b*8 +: 8];
+                reg_wr[aw_addr[AW+1:2]] <= 1'b1;
                 aw_cap <= 1'b0;
                 w_cap  <= 1'b0;
                 bvalid <= 1'b1;
@@ -103,9 +106,9 @@ module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
     logic [31:0]       rdata_comb;
 
     assign arready = !ar_cap && !rvalid;
-    assign rdata_comb = reg_in_sel[ar_addr[AW-1:0]]
-                      ? reg_in[ar_addr[AW-1:0]]
-                      : regf[ar_addr[AW-1:0]];
+    assign rdata_comb = reg_in_sel[ar_addr[AW+1:2]]
+                      ? reg_in[ar_addr[AW+1:2]]
+                      : regf[ar_addr[AW+1:2]];
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

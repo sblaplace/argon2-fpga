@@ -24,7 +24,10 @@
 `include "cl_argon2_defines.vh"
 `include "cl_argon2_axi_if.sv"
 
-module cl_argon2 (
+module cl_argon2 #(
+    parameter int NUM_DDR = 4,
+    parameter int N_P     = 1   // parallel P units in the compression G
+) (
     // ---- clock / reset -------------------------------------------------
     input        clk_main_a0,
     input [15:0] rst_main_n,
@@ -77,8 +80,6 @@ module cl_argon2 (
     output        sh_ocl_rlast,
     output        sh_ocl_rvalid
 );
-
-    localparam int NUM_DDR = `A2_NUM_DDR;
 
     // Reset for the argon2 logic: main reset ANDed with FLR.
     logic rst_n;
@@ -165,7 +166,7 @@ module cl_argon2 (
         .rresp(m_rresp[3]), .rlast(m_rlast[3]));
 
     // ---- Functional core ----------------------------------------------
-    cl_argon2_core #(.NUM_DDR(NUM_DDR)) u_core (
+    cl_argon2_core #(.NUM_DDR(NUM_DDR), .N_P(N_P)) u_core (
         .clk        (clk_main_a0),
         .rst_n      (rst_n),
 

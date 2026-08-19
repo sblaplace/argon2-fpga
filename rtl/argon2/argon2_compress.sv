@@ -6,12 +6,24 @@
 //   Z = P_col(Q)     // 8 independent P
 //   out = Z ⊕ R  [⊕ dest if with_xor, i.e. pass > 0]
 //
-// Blocks stream as 16 beats × 512 bits. One shared argon2_p is reused
-// for all 16 permutations (~9 cycles each → ~160 cycles of compute).
+// Blocks stream as 16 beats × 512 bits. N_P permutation units run in
+// parallel; the 16 P applications are issued in waves of N_P (N_P must
+// divide 16: 1, 2, 4, 8 or 16). Rows of a wave are mutually independent,
+// as are columns, and every column wave reads only blk words written by
+// the row wave, so parallelism does not change the result for any N_P —
+// only the cycle count:
+//
+//   N_P = 1  -> 16 waves × ~9 cycles ≈ 160 cycles of compute per block
+//   N_P = 8  ->  2 waves × ~9 cycles ≈  18 cycles
+//
+// Area scales with N_P (one argon2_p ≈ 16 DSP48 multipliers). Default 1
+// keeps the small, fully-verified core; perf builds use -GN_P=8.
 
 `timescale 1ns / 1ps
 
-module argon2_compress (
+module argon2_compress #(
+    parameter int N_P = 1
+) (
     input  logic         clk,
     input  logic         rst_n,
 
@@ -38,28 +50,65 @@ module argon2_compress (
     logic [63:0] saved [0:WORDS-1];
 
     logic [4:0] beat;
-    logic [4:0] group;     // 0..15 : rows 0..7 then cols 0..7
-    logic         p_in_valid;
-    logic         p_out_valid;
-    logic [1023:0] p_in;
-    logic [1023:0] p_out;
+    logic [4:0] group;          // first P-group of the current wave
+    logic [N_P-1:0]         p_in_valid;
+    logic [N_P-1:0]         p_out_valid;
+    logic [N_P-1:0][1023:0] p_in;
+    logic [N_P-1:0][1023:0] p_out;
 
-    argon2_p u_p (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        .in_valid (p_in_valid),
-        .v_i      (p_in),
-        .out_valid(p_out_valid),
-        .v_o      (p_out)
-    );
+    generate
+        for (genvar gp = 0; gp < N_P; gp = gp + 1) begin : pg
+            argon2_p u_p (
+                .clk      (clk),
+                .rst_n    (rst_n),
+                .in_valid (p_in_valid[gp]),
+                .v_i      (p_in[gp]),
+                .out_valid(p_out_valid[gp]),
+                .v_o      (p_out[gp])
+            );
+        end
+    endgenerate
 
     integer i;
     logic [63:0] xv, yv, dv, rv;
-    logic [3:0]  col;
     logic [4:0]  drain_idx;
 
     always_comb begin
         drain_idx = out_valid ? (beat + 5'd1) : 5'd0;
+    end
+
+    // Gather the inputs for one wave: group g feeds P instance g%N_P.
+    // g < 8 is a row permutation (16 consecutive words); g >= 8 is column
+    // g-8 (words gathered from the column strides, see RFC 9106 §3.5).
+    always_comb begin
+        for (int w = 0; w < N_P; w = w + 1) begin
+            int g;
+            int c;
+            g = group + w;
+            p_in[w] = 1024'd0;
+            if (g < 8) begin
+                for (int i2 = 0; i2 < 16; i2 = i2 + 1)
+                    p_in[w][64*i2 +: 64] = blk[g*16 + i2];
+            end else if (g < 16) begin
+                c = g - 8;
+                p_in[w][64*0  +: 64] = blk[2*c +  0];
+                p_in[w][64*1  +: 64] = blk[2*c +  1];
+                p_in[w][64*2  +: 64] = blk[2*c + 16];
+                p_in[w][64*3  +: 64] = blk[2*c + 17];
+                p_in[w][64*4  +: 64] = blk[2*c + 32];
+                p_in[w][64*5  +: 64] = blk[2*c + 33];
+                p_in[w][64*6  +: 64] = blk[2*c + 48];
+                p_in[w][64*7  +: 64] = blk[2*c + 49];
+                p_in[w][64*8  +: 64] = blk[2*c + 64];
+                p_in[w][64*9  +: 64] = blk[2*c + 65];
+                p_in[w][64*10 +: 64] = blk[2*c + 80];
+                p_in[w][64*11 +: 64] = blk[2*c + 81];
+                p_in[w][64*12 +: 64] = blk[2*c + 96];
+                p_in[w][64*13 +: 64] = blk[2*c + 97];
+                p_in[w][64*14 +: 64] = blk[2*c + 112];
+                p_in[w][64*15 +: 64] = blk[2*c + 113];
+            end
+        end
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -67,13 +116,13 @@ module argon2_compress (
             state      <= LOAD;
             beat       <= 5'd0;
             group      <= 5'd0;
-            p_in_valid <= 1'b0;
+            p_in_valid <= '0;
             in_ready   <= 1'b1;
             out_valid  <= 1'b0;
             out_last   <= 1'b0;
             out_data   <= 512'd0;
         end else begin
-            p_in_valid <= 1'b0;
+            p_in_valid <= '0;
 
             case (state)
                 LOAD: begin
@@ -100,62 +149,45 @@ module argon2_compress (
                 end
 
                 KICK: begin
-                    in_ready <= 1'b0;
-                    if (group < 5'd8) begin
-                        for (i = 0; i < 16; i = i + 1)
-                            p_in[64*i +: 64] <= blk[group*16 + i];
-                    end else begin
-                        col = group[3:0] - 4'd8;
-                        p_in[64*0 +: 64] <= blk[2*col + 0];
-                        p_in[64*1 +: 64] <= blk[2*col + 1];
-                        p_in[64*2 +: 64] <= blk[2*col + 16];
-                        p_in[64*3 +: 64] <= blk[2*col + 17];
-                        p_in[64*4 +: 64] <= blk[2*col + 32];
-                        p_in[64*5 +: 64] <= blk[2*col + 33];
-                        p_in[64*6 +: 64] <= blk[2*col + 48];
-                        p_in[64*7 +: 64] <= blk[2*col + 49];
-                        p_in[64*8 +: 64] <= blk[2*col + 64];
-                        p_in[64*9 +: 64] <= blk[2*col + 65];
-                        p_in[64*10 +: 64] <= blk[2*col + 80];
-                        p_in[64*11 +: 64] <= blk[2*col + 81];
-                        p_in[64*12 +: 64] <= blk[2*col + 96];
-                        p_in[64*13 +: 64] <= blk[2*col + 97];
-                        p_in[64*14 +: 64] <= blk[2*col + 112];
-                        p_in[64*15 +: 64] <= blk[2*col + 113];
-                    end
-                    p_in_valid <= 1'b1;
+                    in_ready   <= 1'b0;
+                    p_in_valid <= '1;
                     state      <= WAIT_P;
                 end
 
                 WAIT_P: begin
-                    if (p_out_valid) begin
-                        if (group < 5'd8) begin
-                            for (i = 0; i < 16; i = i + 1)
-                                blk[group*16 + i] <= p_out[64*i +: 64];
-                        end else begin
-                            col = group[3:0] - 4'd8;
-                            blk[2*col + 0] <= p_out[64*0 +: 64];
-                            blk[2*col + 1] <= p_out[64*1 +: 64];
-                            blk[2*col + 16] <= p_out[64*2 +: 64];
-                            blk[2*col + 17] <= p_out[64*3 +: 64];
-                            blk[2*col + 32] <= p_out[64*4 +: 64];
-                            blk[2*col + 33] <= p_out[64*5 +: 64];
-                            blk[2*col + 48] <= p_out[64*6 +: 64];
-                            blk[2*col + 49] <= p_out[64*7 +: 64];
-                            blk[2*col + 64] <= p_out[64*8 +: 64];
-                            blk[2*col + 65] <= p_out[64*9 +: 64];
-                            blk[2*col + 80] <= p_out[64*10 +: 64];
-                            blk[2*col + 81] <= p_out[64*11 +: 64];
-                            blk[2*col + 96] <= p_out[64*12 +: 64];
-                            blk[2*col + 97] <= p_out[64*13 +: 64];
-                            blk[2*col + 112] <= p_out[64*14 +: 64];
-                            blk[2*col + 113] <= p_out[64*15 +: 64];
+                    if (&p_out_valid) begin
+                        for (int w = 0; w < N_P; w = w + 1) begin
+                            int g;
+                            int c;
+                            g = group + w;
+                            if (g < 8) begin
+                                for (int i2 = 0; i2 < 16; i2 = i2 + 1)
+                                    blk[g*16 + i2] <= p_out[w][64*i2 +: 64];
+                            end else if (g < 16) begin
+                                c = g - 8;
+                                blk[2*c +  0] <= p_out[w][64*0  +: 64];
+                                blk[2*c +  1] <= p_out[w][64*1  +: 64];
+                                blk[2*c + 16] <= p_out[w][64*2  +: 64];
+                                blk[2*c + 17] <= p_out[w][64*3  +: 64];
+                                blk[2*c + 32] <= p_out[w][64*4  +: 64];
+                                blk[2*c + 33] <= p_out[w][64*5  +: 64];
+                                blk[2*c + 48] <= p_out[w][64*6  +: 64];
+                                blk[2*c + 49] <= p_out[w][64*7  +: 64];
+                                blk[2*c + 64] <= p_out[w][64*8  +: 64];
+                                blk[2*c + 65] <= p_out[w][64*9  +: 64];
+                                blk[2*c + 80] <= p_out[w][64*10 +: 64];
+                                blk[2*c + 81] <= p_out[w][64*11 +: 64];
+                                blk[2*c + 96] <= p_out[w][64*12 +: 64];
+                                blk[2*c + 97] <= p_out[w][64*13 +: 64];
+                                blk[2*c + 112] <= p_out[w][64*14 +: 64];
+                                blk[2*c + 113] <= p_out[w][64*15 +: 64];
+                            end
                         end
-                        if (group == 5'd15) begin
+                        if (group + N_P >= 16) begin
                             beat  <= 5'd0;
                             state <= DRAIN;
                         end else begin
-                            group <= group + 5'd1;
+                            group <= group + N_P;
                             state <= KICK;
                         end
                     end
