@@ -188,30 +188,35 @@ module tb_cl_argon2 #(
     );
 
     // ---- OCL BFM --------------------------------------------------------
+    // Drives and samples on the NEGEDGE: changing stimulus in the same
+    // active region as the DUT's posedge sampling is a simulator-order
+    // race (Verilator happened to win it; some vvp builds deadlocked on
+    // the aw/w handshake). Half a cycle away from both edges the
+    // handshakes are unambiguous in every simulator.
     task automatic ocl_write(input [31:0] addr, input [31:0] data);
         fork
             begin
                 sh_ocl_awvalid = 1'b1; sh_ocl_awaddr = addr; sh_ocl_awid = 16'd0;
-                while (!(sh_ocl_awvalid && sh_ocl_awready)) @(posedge clk);
-                @(posedge clk); sh_ocl_awvalid = 1'b0;
+                while (!(sh_ocl_awvalid && sh_ocl_awready)) @(negedge clk);
+                @(negedge clk); sh_ocl_awvalid = 1'b0;
             end
             begin
                 sh_ocl_wvalid = 1'b1; sh_ocl_wdata = data; sh_ocl_wstrb = 16'hFFFF;
-                while (!(sh_ocl_wvalid && sh_ocl_wready)) @(posedge clk);
-                @(posedge clk); sh_ocl_wvalid = 1'b0;
+                while (!(sh_ocl_wvalid && sh_ocl_wready)) @(negedge clk);
+                @(negedge clk); sh_ocl_wvalid = 1'b0;
             end
         join
-        while (!sh_ocl_bvalid) @(posedge clk);
-        sh_ocl_bready = 1'b1; @(posedge clk); sh_ocl_bready = 1'b0;
+        while (!sh_ocl_bvalid) @(negedge clk);
+        sh_ocl_bready = 1'b1; @(negedge clk); sh_ocl_bready = 1'b0;
     endtask
 
     task automatic ocl_read(input [31:0] addr, output [31:0] data);
         sh_ocl_arvalid = 1'b1; sh_ocl_araddr = addr; sh_ocl_arid = 16'd0;
-        while (!(sh_ocl_arvalid && sh_ocl_arready)) @(posedge clk);
-        @(posedge clk); sh_ocl_arvalid = 1'b0;
-        while (!sh_ocl_rvalid) @(posedge clk);
+        while (!(sh_ocl_arvalid && sh_ocl_arready)) @(negedge clk);
+        @(negedge clk); sh_ocl_arvalid = 1'b0;
+        while (!sh_ocl_rvalid) @(negedge clk);
         data = sh_ocl_rdata;
-        sh_ocl_rready = 1'b1; @(posedge clk); sh_ocl_rready = 1'b0;
+        sh_ocl_rready = 1'b1; @(negedge clk); sh_ocl_rready = 1'b0;
     endtask
 
     // ---- test -----------------------------------------------------------
