@@ -60,6 +60,18 @@ module argon2_fill_ctrl #(
     logic         dest_issued, dest_accepted, dest_done;
     logic [4:0]   dest_beat;
 
+    // Overlapped next-block send during WRITE (drain): while the compressor
+    // drains block N it also accepts block N+1's data into its idle buffer
+    // (see argon2_compress double-buffering). The send streams in lockstep
+    // with the drain beats: prev forwards the current output beat, ref
+    // comes from a copy of the prefetched block. Only used for independent
+    // (argon2i/id) pass-0 mid-segment blocks where everything is ready
+    // before the drain starts.
+    logic        nxt_latched;   // overlap eligible, pref_q copied to ref_q
+    logic [4:0]  nxt_beat;
+    logic        nxt_sent;      // all 16 beats sent
+    logic        nxt_skip;      // next DISPATCH must skip data setup
+
     // Write FIFO 32 deep streaming
     localparam int WB_DEPTH = 32;
     logic [511:0] wb_data [0:WB_DEPTH-1];
@@ -107,12 +119,30 @@ module argon2_fill_ctrl #(
     logic         c_out_valid, c_out_ready, c_out_last;
     logic [511:0] c_out_data;
 
-    assign c_in_valid = (state == COMPRESS) && (dstream ? mem_rd_data_v : 1'b1);
-    assign c_in_x     = prev_q[beat[3:0]];
-    assign c_in_y     = ref_q [beat[3:0]];
-    assign c_in_dest  = dstream ? mem_rd_data : (with_xor ? dest_q[beat[3:0]] : 512'd0);
-    assign c_in_last  = (beat == 5'd15);
+    // Streaming inputs to the compressor. During WRITE with the overlapped
+    // send active (nxt_sending), the next block's data streams in lockstep
+    // with the drain beats starting on the FIRST output beat: prev forwards
+    // the current output beat (block N's output = block N+1's prev), ref
+    // comes from the prefetched ref_q copy.
+    assign nxt_sending = nxt_latched && !nxt_sent;
+    assign c_in_valid = (state == COMPRESS) ? (dstream ? mem_rd_data_v : 1'b1)
+                       : (state == WRITE)   ? (nxt_sending && c_out_valid && c_out_ready)
+                       : 1'b0;
+    assign c_in_x     = (state == WRITE && nxt_sending) ? c_out_data : prev_q[beat[3:0]];
+    assign c_in_y     = (state == WRITE && nxt_sending) ? ref_q[nxt_beat[3:0]] : ref_q[beat[3:0]];
+    assign c_in_dest  = (state == WRITE && nxt_sending) ? (with_xor ? dest_q[nxt_beat[3:0]] : 512'd0)
+                       : dstream ? mem_rd_data : (with_xor ? dest_q[beat[3:0]] : 512'd0);
+    assign c_in_last  = (state == WRITE && nxt_sending) ? (nxt_beat == 5'd15) : (beat == 5'd15);
     assign c_out_ready = (state == WRITE) && (wb_count < WB_DEPTH);
+
+    // Overlap eligibility: independent addressing (argon2i / argon2id first
+    // half), the next ref already prefetched, prev available from the write
+    // cache, no dest XOR (pass 0), and not at a segment or address-window
+    // boundary. Must be true before the drain starts so the send is aligned
+    // with drain beat 0.
+    assign nxt_ok = independent && pref_ready && cache_valid && !with_xor
+                  && (index_r + 32'd1 < segment_length)
+                  && (index_n[6:0] != 7'd0);
 
     argon2_compress #(.N_P(N_P)) u_g (
         .clk(clk), .rst_n(rst_n),
@@ -137,10 +167,24 @@ module argon2_fill_ctrl #(
         .lane_length(lane_length), .ref_index(z)
     );
     logic [31:0] index_n, j1_n, ref_area_n, start_pos_n, z_n, ref_lane_n, ref_idx_n;
-    logic        same_lane_n, can_prefetch;
+    logic        same_lane_n, can_prefetch, can_prefetch_n2;
+    logic        nxt_ok;         // overlap eligible before the drain starts
+    logic        nxt_sending;    // comb: overlapped send in progress
+    logic        nxt_issue2;     // comb: latch pulse (issue K+2 prefetch)
+    logic [31:0] ag_idx_n;       // u_area_n index: K+1, or K+2 during the latch
+    logic [6:0]  ag_rdb;         // addr_gen rd_idx_b: K+1, or K+2 during the latch
+    logic [31:0] index_n2;       // K+2 (= index_r + 2)
+
+    // During the overlap latch the second address port is redirected to
+    // block K+2 so the K+2 prefetch can be issued before the drain even
+    // starts, letting every independent block chain (not every other one).
+    assign index_n2    = index_n + 32'd1;
+    assign nxt_issue2  = nxt_ok && !nxt_latched && !c_out_valid;
+    assign ag_idx_n    = nxt_issue2 ? index_n2 : index_n;
+    assign ag_rdb      = nxt_issue2 ? index_n2[6:0] : index_n[6:0];
 
     argon2_ref_area u_area_n (
-        .pass(pass_r), .slice(slice_r), .index(index_n),
+        .pass(pass_r), .slice(slice_r), .index(ag_idx_n),
         .lane_length(lane_length), .segment_length(segment_length),
         .same_lane(same_lane_n), .ref_area(ref_area_n), .start_position(start_pos_n)
     );
@@ -155,7 +199,7 @@ module argon2_fill_ctrl #(
         .slice(slice_r), .memory_blocks(memory_blocks), .time_cost(passes),
         .type_i({30'd0, type_i}), .start(a_start), .busy(a_busy), .done(a_done),
         .rd_idx(index_r[6:0]), .rd_j(addr_word),
-        .rd_idx_b(index_n[6:0]), .rd_j_b(addr_word_n)
+        .rd_idx_b(ag_rdb), .rd_j_b(addr_word_n)
     );
 
     assign segment_length = lane_length / SYNC;
@@ -181,6 +225,11 @@ module argon2_fill_ctrl #(
     assign same_lane_n    = (ref_lane_n == lane_id);
     assign ref_idx_n      = ref_lane_n * lane_length + z_n;
     assign can_prefetch   = independent && (index_n < segment_length) && (index_n[6:0] != 7'd0) && !wb_hit_ref_n_eff;
+    // Same rule for block K+2 (used to chain the overlapped prefetches).
+    // With nxt_issue2 the second address port already points at K+2, so
+    // wb_hit_ref_n_eff / ref_idx_n reflect K+2 during the latch pulse.
+    assign can_prefetch_n2 = independent && (index_n2 < segment_length)
+                           && (index_n2[6:0] != 7'd0) && !wb_hit_ref_n_eff;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -201,6 +250,10 @@ module argon2_fill_ctrl #(
             dest_accepted <= 1'b0;
             dest_done <= 1'b0;
             dest_beat <= 5'd0;
+            nxt_latched <= 1'b0;
+            nxt_beat    <= 5'd0;
+            nxt_sent    <= 1'b0;
+            nxt_skip    <= 1'b0;
             cache_valid <= 1'b0;
             cache_addr <= '0;
             dstream <= 1'b0;
@@ -249,7 +302,11 @@ module argon2_fill_ctrl #(
                 pref_accepted <= 1'b1;
                 mem_rd_valid <= 1'b0;
             end
-            if ((state == COMPRESS || state == WRITE || state == ADVANCE) && pref_issued && pref_accepted && !pref_ready) begin
+            // DISPATCH is included because the nxt_skip fast path can reach
+            // it while a chained prefetch's last beat is still returning;
+            // the normal path only enters DISPATCH with prefetch idle or
+            // pref_ready set, so this cannot double-collect.
+            if ((state == COMPRESS || state == WRITE || state == ADVANCE || state == DISPATCH) && pref_issued && pref_accepted && !pref_ready) begin
                 if (mem_rd_data_v) begin
                     pref_q[pref_beat] <= mem_rd_data;
                     if (mem_rd_last || pref_beat == 5'd15) begin
@@ -289,6 +346,10 @@ module argon2_fill_ctrl #(
                         pref_issued <= 1'b0;
                         pref_ready <= 1'b0;
                         pref_accepted <= 1'b0;
+                        nxt_latched <= 1'b0;
+                        nxt_beat    <= 5'd0;
+                        nxt_sent    <= 1'b0;
+                        nxt_skip    <= 1'b0;
                         cache_valid <= 1'b0;
                         wb_wptr <= 6'd0;
                         wb_rptr <= 6'd0;
@@ -319,7 +380,24 @@ module argon2_fill_ctrl #(
                 end
                 DISPATCH: begin
                     beat <= 5'd0;
-                    if (independent && pref_ready) begin
+                    if (nxt_skip) begin
+                        // The next block was already streamed into the
+                        // compressor during the previous drain (overlapped
+                        // send): skip the data setup, issue the following
+                        // block's prefetch here (there is no COMPRESS for
+                        // this block), and wait for its drain.
+                        nxt_skip    <= 1'b0;
+                        nxt_latched <= 1'b0;
+                        nxt_beat    <= 5'd0;
+                        nxt_sent    <= 1'b0;
+                        if (can_prefetch && !pref_issued && !pref_ready && !mem_rd_valid) begin
+                            mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
+                            mem_rd_valid <= 1'b1;
+                            pref_issued <= 1'b1;
+                            pref_beat <= 5'd0;
+                        end
+                        state <= WRITE;
+                    end else if (independent && pref_ready) begin
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         pref_ready <= 1'b0; pref_issued <= 1'b0; pref_accepted <= 1'b0;
                         if (cache_valid) begin
@@ -486,14 +564,64 @@ module argon2_fill_ctrl #(
                     end
                 end
                 WRITE: begin
+                    // Latch overlap eligibility while the drain is still
+                    // pending and copy the prefetched ref into ref_q (the
+                    // block we will stream next). Never latch after the
+                    // drain has started — the send must start on drain
+                    // beat 0 so it finishes exactly with the drain.
+                    if (nxt_ok && !nxt_latched && !c_out_valid) begin
+                        nxt_latched <= 1'b1;
+                        nxt_beat    <= 5'd0;
+                        for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
+                        // The prefetched ref for this block is consumed by
+                        // the copy: clear the handshake flags so ADVANCE
+                        // does not stall. Immediately issue the K+2 prefetch
+                        // (the second addr port is redirected to K+2 during
+                        // this cycle): it completes before the next drain
+                        // starts, so every independent block can overlap.
+                        pref_ready    <= 1'b0;
+                        pref_issued   <= 1'b0;
+                        pref_accepted <= 1'b0;
+                        pref_beat     <= 5'd0;
+                        if (can_prefetch_n2 && !mem_rd_valid) begin
+                            mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
+                            mem_rd_valid <= 1'b1;
+                            pref_issued <= 1'b1;
+                            pref_beat   <= 5'd0;
+                        end
+                    end
+
+                    // Advance the send in lockstep with the drain beats,
+                    // starting on the first output beat (nxt_sending is
+                    // combinational, so the first beat transfers on the
+                    // same cycle as the first drain handshake).
+                    if (nxt_sending && c_in_ready && c_out_valid && c_out_ready) begin
+                        if (nxt_beat == 5'd15) begin
+                            nxt_sent <= 1'b1;
+                        end else begin
+                            nxt_beat <= nxt_beat + 5'd1;
+                        end
+                    end
+
                     if (c_out_valid && c_out_ready) begin
                         if (c_out_last) begin
-                            state <= ADVANCE;
+                            // If the overlapped send finished with the drain,
+                            // the next DISPATCH must skip the data setup.
+                            if (nxt_sending) nxt_skip <= 1'b1;
+                            nxt_latched <= 1'b0;
+                            state       <= ADVANCE;
                         end
                     end
                 end
                 ADVANCE: begin
-                    if (pref_issued && !pref_ready) state <= ADVANCE;
+                    if (nxt_skip) begin
+                        // Overlapped block: no boundary can be pending (the
+                        // overlap gating guarantees mid-segment / mid-window)
+                        // and the in-flight K+2 prefetch is not consumed by
+                        // DISPATCH[skip], so advance straight to it.
+                        index_r <= index_r + 32'd1;
+                        state   <= DISPATCH;
+                    end else if (pref_issued && !pref_ready) state <= ADVANCE;
                     else if (index_r >= segment_length || index_r + 32'd1 == segment_length) begin
                         if (wb_count != 0) state <= ADVANCE;
                         else begin

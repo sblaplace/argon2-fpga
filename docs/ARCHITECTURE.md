@@ -34,8 +34,15 @@ Current RTL (`argon2_compress`):
 - 4 parallel GB units inside each P (the column/diagonal groups have no
   internal dependence).
 - The measured performance point is **N_P=8**: two P waves, about 18 P
-  cycles and 67.9 total cycles per block against the DDR model. N_P=1 is
-  the small-area default and takes about 160 P cycles.
+  cycles and 61.8 total cycles per block against the DDR model (argon2i
+  t=3). N_P=1 is the small-area default and takes about 160 P cycles.
+- The block store is **double-buffered**: while the compressor drains
+  block N it also accepts block N+1's input into the idle buffer, and the
+  fill controller streams it in lockstep with the drain beats (prev
+  forwarded from the output, ref from the prefetch). Pass-0 independent
+  blocks therefore skip the LOAD/COMPRESS phase entirely and chain via an
+  early K+2 prefetch; passes 1–2 keep the serial path because the
+  dest-xor read would not be ready in time on the single memory port.
 
 ### Why not fully unroll
 
@@ -55,13 +62,15 @@ from the F1 build):
 | LUT      | add/xor/rotate + block state | roughly 8× P logic + block state |
 | BRAM     | 0 if the 128-word file is registers; more if mapped to RAM | same storage order |
 | P cycles/G | ~160 | ~18 |
-| Measured total cycles/block | ~249 DDR4 | ~67.9 DDR4 |
+| Measured total cycles/block | ~249 DDR4 | ~61.8 DDR4 |
 
-At 200 MHz, N_P=8 measures 0.937 candidate/s per lane for the 1 GiB,
-t=3 Argon2i projection, within about 9% of its ideal-memory compute floor.
-See [`PERFORMANCE.md`](PERFORMANCE.md) for the complete sweep and model
-caveats. The next compute experiment is compress double-buffering; real F1
-timing closure and DDR measurements should come first.
+At 200 MHz, N_P=8 measures 1.029 candidate/s per lane for the 1 GiB,
+t=3 Argon2i projection — within ~4% of the 200 MHz AXI bus ceiling
+(~1.07 cand/s/lane); the IDEAL-memory floor is 56.3 cyc/blk (1.13
+cand/s). See [`PERFORMANCE.md`](PERFORMANCE.md) for the complete sweep
+and model caveats. Real F1 timing closure and DDR measurements should
+come next; the remaining compute-side idea is overlapping the dest-xor
+passes.
 
 ## Indexing
 

@@ -40,54 +40,62 @@ AXI traffic, port utilization, and an FSM-state cycle histogram.
 | N_P=2                               | 143.6   | 0.443          | 1.77        | 23%           |
 | N_P=4                               | 92.6    | 0.686          | 2.75        | 34%           |
 | **N_P=8 (prev, no write FIFO)**     | 68.7    | 0.926          | 3.70        | 47%           |
-| **N_P=8 + 32-deep write FIFO (now)**| **67.9**| **0.937**     | **3.75**    | 48%           |
+| **N_P=8 + 32-deep write FIFO**      | 67.9    | 0.937          | 3.75        | 48%           |
+| **+ compress double-buffer + overlapped next-block send (now)** | **61.8** | **1.029** | **4.12** | **55%** |
 
-Per-lane IDEAL floor at N_P=8 is now **62.3 cyc/blk (1.02 cand/s)**
-— down from 64.3 — the core is within ~9% of its own compute floor,
-and the DDR port is less than half busy: **the lane is
-compute/latency-bound, not memory-bound**, exactly the opposite of the
-README's original assumption.
+Per-lane IDEAL floor at N_P=8 is now **56.3 cyc/blk (1.13 cand/s)** —
+down from 62.3 — because the double-buffered compressor lets LOAD of the
+next block overlap DRAIN of the current one, so overlapped blocks cost no
+COMPRESS cycles at all. The DDR4 number (61.8 cyc/blk, 1.029 cand/s) is
+within ~4% of the 200 MHz AXI bus ceiling (~1.07 cand/s/lane): **the lane
+is now essentially AXI-bandwidth-bound for argon2i**, and the DDR port is
+55% busy.
 
 The per-block structure at N_P=8 (DDR4, from the FSM histogram,
 m'=4096, t=3, argon2i):
 
 ```
-DISPATCH     1    copy prefetch→ref, prev comes from the write cache
-COMPRESS    16    load beats (dest-xor read was prefetched a block early)
-WRITE       43    2×P waves (~18) + 16-beat push to FIFO (pop overlaps next)
-ADVANCE      2.4
-DEST_WAIT    4.0  residual waits for the early dest read
-COLLECT_REF  0.3  etc.
+DISPATCH     1.6  copy prefetch→ref (skipped for overlapped blocks)
+COMPRESS    10.9  pass-0 blocks overlap away their LOAD (chained send)
+WRITE       41.2  2×P waves (~18) + 16-beat push to FIFO + first-beat wait
+ADVANCE      3.3  fast path for overlapped blocks (no prefetch wait)
+DEST_WAIT    4.0  pass>0 residual waits for the early dest read
+ADDR_WAIT    1.5  one G-window per 128 blocks
+COLLECT_REF  0.4  etc.
 ────────────
-~67.9 cyc/block
+~61.8 cyc/block
 ```
 
-Ideal/Streaming experiment breakdown:
-
-* Double-buffer that waited for full block before draining: IDEAL 63.1,
-  DDR4 69.6 (worse, port busy 64% — write start delayed).
-* **Streaming 32-deep FIFO (current): IDEAL 62.3, DDR4 67.9, port busy 48%**
-  — saves ~2 cyc ideal, ~0.8 cyc DDR4 vs no-FIFO baseline.
-* IDEAL_WR (instant write commits) experiment: 82→77.7 cyc/blk at N_P=1
-  → adapter B-response worth only ~4 cyc.
+How the overlap works (`argon2_compress` double-buffer +
+`argon2_fill_ctrl` overlapped send): while the compressor drains block N
+it accepts block N+1's data into its idle buffer. The fill controller
+streams it in lockstep with the drain beats — prev is the current output
+beat forwarded combinatorially, ref is the already-prefetched block — and
+the next prefetch (block N+2) is issued during the same drain via a
+redirected second address port, so every independent block chains (no
+COMPRESS state at all). Passes 1–2 keep the serial COMPRESS→WRITE path
+(the dest-xor read would not be ready before the drain starts with a
+single memory port); that is why the average lands between "all pass 0
+blocks free" and the old number.
 
 ### Type sweep (N_P=8, m'=1 MiB, t=3, DDR4)
 
 | Type      | cyc/blk (DDR4) | cand/s/lane | F1×4 | Bottleneck |
 |-----------|----------------|-------------|------|------------|
-| argon2i   | 68 (67.9)      | 0.937       | 3.75 | WRITE/P    |
-| argon2d   | ~107           | 0.593       | 2.37 | COLLECT_REF 30% — dependent ref, no prefetch |
-| argon2id  | ~100           | 0.634       | 2.54 | mixed |
+| argon2i   | 61.8           | 1.029       | 4.12 | AXI bus ceiling (~1.07) |
+| argon2d   | 106.7          | 0.596       | 2.38 | COLLECT_REF — dependent ref, no prefetch |
+| argon2id  | 97.2           | 0.654       | 2.62 | mixed (first half overlaps, second is d-like) |
 
-argon2i benefits from 128-block G prefetch (full compute-latency early).
-argon2d has to wait for prev block to get J1||J2, then issue ref — the
-random read latency is on the critical path. The cache still kills the
-prev read, but ref remains.
+argon2i benefits from 128-block G prefetch (full compute-latency early)
+and now from the chained overlapped send. argon2d has to wait for prev
+block to get J1||J2, then issue ref — the random read latency is on the
+critical path. The cache still kills the prev read, but ref remains.
 
 The AXI bus ceiling at 200 MHz is 12.8 GB/s ÷ ~11.5 GB traffic per
 1 GiB candidate ≈ **1.07 cand/s/lane** (the shell's 512-bit @ 250 MHz
-raises it to ~1.33). The remaining gap from 0.94 to the ceiling is the
-serial P→drain chain and AXI write handshakes.
+raises it to ~1.33). At 1.029 cand/s the argon2i lane is within ~4% of
+that ceiling; the residual gap is the pass>0 serial path and the AXI
+write handshakes.
 
 ## What the measurements forced
 
@@ -116,6 +124,14 @@ serial P→drain chain and AXI write handshakes.
      Includes RAW bypass: if a ref hits a pending write, stall until it
      drains; if it hits the cache (last block), use cache. Hit rate is
      negligible for 1 GiB (1/256k), but correctness is maintained.
+   * **Compress double-buffering + chained overlapped send**: the
+     compressor keeps two 1 KiB block buffers; during DRAIN it also
+     accepts the next block's input (background load), and the fill
+     controller streams block N+1 into it in lockstep with N's drain
+     beats — prev forwarded from the output, ref from the prefetch — then
+     issues block N+2's prefetch in the same drain window via a
+     redirected second address port. Pass-0 blocks skip COMPRESS entirely
+     and chain; saves ~6 cyc/blk on the 1 GiB t=3 argon2i reference.
 
 2. **The write path is nearly free already** — an experiment with
    instant write commits (IDEAL_WR) gains only ~4 cyc/blk, so a
@@ -137,12 +153,16 @@ serial P→drain chain and AXI write handshakes.
 ## Remaining headroom (in rough order)
 
 * **250 MHz CL clock** (the F1 shell runs sh_ddr at 250 MHz in the
-  reference designs): same cycle counts → ~1.17 cand/s/lane argon2i,
-  ~4.7 F1. Needs a timing-closure pass (the BlaMka mult-add chain is the
-  critical path).
-* **Compress double-buffering**: LOAD of next block overlapping DRAIN of
-  previous could hide another ~10-15 cyc, but needs 2× blk RAM in
-  `argon2_compress`. Upper bound is AXI ceiling 1.07 @200 MHz.
+  reference designs): same cycle counts → ~1.29 cand/s/lane argon2i,
+  ~5.1 F1 (bounded by the 250 MHz AXI ceiling ~1.33). Needs a
+  timing-closure pass (the BlaMka mult-add chain is the critical path).
+* **Overlap passes 1–2 (dest-xor)**: the pass>0 blocks still use the
+  serial COMPRESS→WRITE path because the dest-xor read for block N+1
+  cannot complete before N's drain starts with a single memory port.
+  A second outstanding read (or issuing the dest read one block earlier
+  from a computed K+2 address) would extend the chain to ~all blocks:
+  upper bound is the 1.07 @200 MHz AXI ceiling, i.e. the gain is the
+  remaining ~4% plus margin.
 * **Deeper P retiming** (the 2-wave × ~9-cycle P chain is the hard
   floor; 16 P units instead of 8 does not help — the column wave reads
   the row wave's output).
