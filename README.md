@@ -87,12 +87,16 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       DDR4-2400 timing model (`sim/tb_ddr4_ram.sv`, `make -C sim perf`) —
       and it turned out compute-bound, not memory-bound. Fixes (parallel-P
       compression `N_P`, write-through prev cache, early dest-xor read,
-      dest streaming, **32-deep streaming write FIFO**) took it from
-      **0.21 → 0.94 cand/s per lane** (t=3, 1 GiB, 200 MHz, argon2i),
-      i.e. **~3.75 cand/s on a 4-channel f1.2xlarge**, with the DDR port
-      48% busy (IDEAL floor 62.3 cyc/blk → 1.02 cand/s). Type sweep:
-      argon2d ~0.59/lane, argon2id ~0.63/lane (ref-latency bound, no
-      prefetch). Numbers, sweep tables, and remaining headroom:
+      dest streaming, 32-deep streaming write FIFO, **compress
+      double-buffering + chained overlapped next-block send**) took it
+      from **0.21 → 1.03 cand/s per lane** (t=3, 1 GiB, 200 MHz, argon2i),
+      i.e. **~4.1 cand/s on a 4-channel f1.2xlarge**, within ~4% of the
+      200 MHz AXI bus ceiling (1.07), with the DDR port 55% busy. The
+      double-buffer lets the compressor load block N+1 while draining
+      block N; pass-0 blocks skip COMPRESS entirely and chain (IDEAL
+      floor 56.3 cyc/blk → 1.13 cand/s). Type sweep: argon2d ~0.60/lane,
+      argon2id ~0.65/lane (ref-latency bound, no prefetch). Numbers,
+      sweep tables, and remaining headroom:
       [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). The same work flushed
       out four latent CL bugs (broken file list, missing `rready` in the
       local `axi_bus_t`, a byte-addressing bug in the OCL slave,
@@ -106,8 +110,8 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       [`fpga/f1/host/bw_test.c`](fpga/f1/host/bw_test.c) (`fpga/f1/build.sh`).
 - [ ] Scale independent p=1 jobs to N channels; measure cand/s vs. the
       bandwidth ceiling (per `docs/PERFORMANCE.md`, the ceiling per 512-bit
-      @ 200 MHz channel is ~1.07 cand/s — the 0.94/lane argon2i measurement
-      is already within ~12% of it; argon2d 0.59/lane is ref-latency bound).
+      @ 200 MHz channel is ~1.07 cand/s — the 1.03/lane argon2i measurement
+      is already within ~4% of it; argon2d 0.60/lane is ref-latency bound).
 - [ ] Add an owner-channel read crossbar before enabling a single p>1 job
       across physically partitioned memories; Argon2 references other lanes,
       so a barrier alone is insufficient.
