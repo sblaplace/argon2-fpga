@@ -22,16 +22,10 @@ module argon2_index (
     logic [63:0] area_x;
     logic [31:0] rel;
 
-    always_comb begin
-        j1_sq = j1 * j1;
-        area_x = ref_area * j1_sq[63:32];
-        rel = ref_area - 32'd1 - area_x[63:32];
-        // start + rel  (mod lane_length). lane_length is a power of two
-        // in every legal Argon2 parameter set (m' is a multiple of 4p,
-        // lane_length = m'/p is a multiple of 4). Use a remainder for
-        // correctness on any lane_length.
-        ref_index = (start_position + rel) % lane_length;
-    end
+    assign j1_sq = j1 * j1;
+    assign area_x = ref_area * j1_sq[63:32];
+    assign rel = ref_area - 32'd1 - area_x[63:32];
+    assign ref_index = (start_position + rel) % lane_length;
 endmodule
 
 // Combinational |W| / start_position helper matching PHC index_alpha.
