@@ -153,7 +153,8 @@ module tb_argon2_fill_discipline #(
         input [1:0] typ, input string init_f, input string exp_f, input string name
     );
         integer mismatches;
-        $display("discipline %s …", name);
+        integer timed_out;
+        $display("discipline %s", name);
         rst_n = 1'b0;
         start = 1'b0;
         repeat (4) @(posedge clk);
@@ -172,11 +173,13 @@ module tb_argon2_fill_discipline #(
             @(posedge clk);
             cycles = cycles + 1;
         end
+        timed_out = 0;
         if (!done) begin
             $display("FAIL %s timeout", name);
             errors = errors + 1;
-            return;
+            timed_out = 1;
         end
+        if (timed_out == 0) begin
         @(posedge clk);
         @(posedge clk);
 
@@ -214,6 +217,7 @@ module tb_argon2_fill_discipline #(
         end
         if (mismatches == 0 && p0_compress < p1_compress && p1_compress != 0)
             $display("  %s PASS", name);
+        end
     endtask
 
     initial begin
