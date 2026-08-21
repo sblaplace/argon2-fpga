@@ -2,10 +2,11 @@
 
 ## Status
 
-**Not implemented (pending).** This note captures the *intent* of the
-throughput optimization so it can be re-attempted carefully on top of
-green `main`, and records the failure mode of the first attempt to avoid
-repeating it.
+**Guarded, not yet optimized.** PR #12's four mechanisms are documented here
+for a careful incremental re-attempt. Step 1 of the plan (a state-discipline
+gate that locks the pass-0-overlap / pass>0-serial structure) is **implemented**
+in this PR as `sim/tb_argon2_fill_discipline.sv` and wired into the CI bench
+list. Nothing in the RTL is changed; green `main` stays bit-identical.
 
 ## Objective
 
@@ -77,10 +78,14 @@ The repo already carries the acceptance harness:
 rfc, axi, cl`. Every COMPLETE step must keep all of them green plus the
 `perf` bench bit-identical to main's numbers.
 
-1. **Baseline gate.** Without touching RTL, write a benchtop test that
-   locks pass-0 overlap and pass>0 serial behavior (golden-bit vs
-   reference). This is the harness that makes a correctness regression
-   attributable.
+1. **Baseline gate (DONE — `sim/tb_argon2_fill_discipline.sv`, this PR).**
+   A state-discipline bench that re-asserts bit-identical KAT output *and*
+   locks the overlap structure: pass-0 COMPRESS cycles strictly less than
+   pass>0 (overlap is pass-0-only because `nxt_ok` requires `!with_xor`).
+   Measured on green main (N_P=1, m'=8, t=2, these vectors):
+   argon2i p0=64 p1=180, argon2d p0=96 p1=232, argon2id p0=96 p1=232.
+   This is the harness that makes a correctness *or* throughput regression in
+   the overlapped path attributable. RTL untouched; main stays golden.
 
 2. **Dest double-buffering.** add `dest_q`/`dest_work_q` in the serialize
    -in-one-register form first (no multi-read), verify vs the KAT suite.
@@ -117,3 +122,7 @@ port.
 - 2026-08-21: PR #12 big-bang attempt closed as dead (broken FSM, 27
   commits, never green). This note captures the intent in `docs/` only so a
   future attempt starts from the research record, not from the failed diff.
+- 2026-08-21: PR #13 adds the step-1 baseline gate and this intent/plan note.
+  Verified with Verilator (reference sim, per PERFORMANCE.md): discipline
+  bench passes for argon2i / argon2d / argon2id; RTL unchanged (bit-KAT
+  identical to green main).
