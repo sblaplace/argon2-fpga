@@ -268,6 +268,9 @@ module argon2_fill_ctrl #(
                            && (index_n2[6:0] != 7'd0) && !wb_hit_ref_n_eff;
 
     always_ff @(posedge clk or negedge rst_n) begin
+        logic rd_handshake;
+        logic wb_push, wb_pop;
+        logic [5:0] next_count, next_wptr, next_rptr;
         if (!rst_n) begin
             state <= IDLE;
             done  <= 1'b0;
@@ -303,9 +306,7 @@ module argon2_fill_ctrl #(
             wb_count <= 6'd0;
             wb_wbeat <= 5'd0;
         end else begin
-            logic rd_handshake;
-            logic wb_push, wb_pop;
-            logic [5:0] next_count, next_wptr, next_rptr;
+            
             wb_push = (state == WRITE) && c_out_valid && c_out_ready;
             wb_pop  = mem_wr_valid && mem_wr_ready;
 
