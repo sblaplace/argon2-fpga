@@ -321,7 +321,7 @@ module argon2_fill_ctrl #(
                 wb_addr[wb_wptr] <= curr_idx[ADDR_W-1:0];
                 wb_last[wb_wptr] <= c_out_last;
                 cache_q[wb_wbeat] <= c_out_data;
-                next_wptr = (wb_wptr == WB_DEPTH-1) ? 6'd0 : wb_rptr + 6'd1;
+                next_wptr = (wb_wptr == WB_DEPTH-1) ? 6'd0 : wb_wptr + 6'd1;
                 next_count = next_count + 6'd1;
                 if (c_out_last) begin
                     cache_addr <= curr_idx[ADDR_W-1:0];
@@ -337,44 +337,28 @@ module argon2_fill_ctrl #(
             a_init <= 1'b0;
             a_start <= 1'b0;
 
-            if (pref_issued && !pref_accepted && mem_rd_valid && mem_rd_ready) begin
-                pref_accepted <= 1'b1;
-                if (with_xor && !dest_last_blk && !dest_issued) begin
-                    mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
-                    mem_rd_valid <= 1'b1;
-                    dest_issued  <= 1'b1;
-                    dest_beat    <= 5'd0;
+            logic rd_handshake;
+            rd_handshake = mem_rd_valid && mem_rd_ready;
+            if (rd_handshake) begin
+                if (pref_issued && !pref_accepted) begin
+                    pref_accepted <= 1'b1;
+                    if (with_xor && !dest_last_blk && !dest_issued) begin
+                        mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        dest_issued  <= 1'b1;
+                        dest_beat    <= 5'd0;
+                    end else begin
+                        mem_rd_valid <= 1'b0;
+                    end
+                end else if (dest_issued && !dest_accepted) begin
+                    dest_accepted <= 1'b1;
+                    mem_rd_valid  <= 1'b0;
+                end else if (dep_issued && !dep_accepted) begin
+                    dep_accepted <= 1'b1;
+                    mem_rd_valid <= 1'b0;
                 end else begin
                     mem_rd_valid <= 1'b0;
                 end
-            end
-            // DISPATCH is included because the nxt_skip fast path can reach
-            // it while a chained prefetch's last beat is still returning;
-            // the normal path only enters DISPATCH with prefetch idle or
-            // pref_ready set, so this cannot double-collect.
-            if ((state == COMPRESS || state == WRITE || state == ADVANCE || state == DISPATCH) && pref_issued && pref_accepted && !pref_ready) begin
-                if (mem_rd_data_v) begin
-                    pref_q[pref_beat] <= mem_rd_data;
-                    if (mem_rd_last || pref_beat == 5'd15) begin
-                        pref_ready <= 1'b1;
-                        pref_accepted <= 1'b0;
-                        pref_beat <= 5'd0;
-                    end else pref_beat <= pref_beat + 5'd1;
-                end
-            end
-            if (dest_issued && dest_accepted && !dest_done && (pref_ready || !pref_issued)) begin
-                if (mem_rd_data_v) begin
-                    dest_q[dest_beat] <= mem_rd_data;
-                    if (mem_rd_last || dest_beat == 5'd15) begin
-                        dest_done <= 1'b1;
-                        dest_beat <= 5'd0;
-                    end else dest_beat <= dest_beat + 5'd1;
-                end
-            end
-
-            if (dep_issued && !dep_accepted && mem_rd_valid && mem_rd_ready) begin
-                dep_accepted <= 1'b1;
-                mem_rd_valid <= 1'b0;
             end
             // Collect the early dep response in ANY state once accepted, so
             // a state transition mid-burst cannot drop its trailing beats.
@@ -525,7 +509,7 @@ module argon2_fill_ctrl #(
                 DREF_SETTLE: begin
                     dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
                     dep_idx <= 32'd0;
-                    if (wb_hit_ref_eff) state <= DREF_SETTLE;
+                    if (wb_hit_ref_eff) state <= DREF_SETTLE; else if (pref_issued || dest_issued || dep_issued) state <= DREF_SETTLE;
                     else begin
                         mem_rd_addr <= ref_idx[ADDR_W-1:0];
                         mem_rd_valid <= 1'b1;
@@ -586,7 +570,7 @@ module argon2_fill_ctrl #(
                         if (mem_rd_last || beat == 5'd15) begin
                             beat <= 5'd0;
                             if (!independent) begin
-                                if (wb_hit_ref_eff) state <= DREF_SETTLE;
+                                if (wb_hit_ref_eff) state <= DREF_SETTLE; else if (pref_issued || dest_issued || dep_issued) state <= DREF_SETTLE;
                                 else begin
                                     mem_rd_addr <= ref_idx[ADDR_W-1:0];
                                     mem_rd_valid <= 1'b1;
