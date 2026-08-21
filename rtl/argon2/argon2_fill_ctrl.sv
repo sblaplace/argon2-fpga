@@ -41,7 +41,7 @@ module argon2_fill_ctrl #(
     } state_t;
     state_t state;
 
-    logic [31:0] pass_r, slice_r, index_r;
+    logic rd_handshake; logic wb_push, wb_pop; logic [5:0] next_wb_count; logic [31:0] pass_r, slice_r, index_r;
     logic [31:0] segment_length;
     logic [31:0] curr_idx, prev_idx, ref_idx, ref_lane;
     logic        independent, with_xor;
@@ -237,8 +237,7 @@ module argon2_fill_ctrl #(
                            && (index_n2[6:0] != 0) && !wb_hit_ref_n_eff;
 
     always @(posedge clk or negedge rst_n) begin
-        logic wb_push, wb_pop;
-        logic [5:0] next_wb_count;
+
         if (!rst_n) begin
             state <= IDLE; done <= 0;
             pass_r <= 0; slice_r <= 0; index_r <= 0;
