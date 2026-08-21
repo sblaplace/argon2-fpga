@@ -20,15 +20,15 @@ module argon2_fill_ctrl #(
     input  logic [1:0]        type_i,
     output logic              sync_req,
     input  logic              sync_ack,
-    output logic              mem_rd_valid,
-    input  logic              mem_rd_ready,
     output logic [ADDR_W-1:0] mem_rd_addr,
+    input  logic              mem_rd_valid,
+    input  logic              mem_rd_ready,
     input  logic              mem_rd_data_v,
     input  logic [511:0]      mem_rd_data,
     input  logic              mem_rd_last,
+    output logic [ADDR_W-1:0] mem_wr_addr,
     output logic              mem_wr_valid,
     input  logic              mem_wr_ready,
-    output logic [ADDR_W-1:0] mem_wr_addr,
     output logic [511:0]      mem_wr_data,
     output logic              mem_wr_last,
     output logic [4:0]        state_o
@@ -41,7 +41,7 @@ module argon2_fill_ctrl #(
     } state_t;
     state_t state;
 
-    logic rd_handshake; logic wb_push, wb_pop; logic [5:0] next_wb_count; logic [31:0] pass_r, slice_r, index_r;
+    logic [31:0] pass_r, slice_r, index_r;
     logic [31:0] segment_length;
     logic [31:0] curr_idx, prev_idx, ref_idx, ref_lane;
     logic        independent, with_xor;
@@ -67,8 +67,9 @@ module argon2_fill_ctrl #(
     logic         dep_issued, dep_accepted, dep_ready;
     logic         dep_seen;
     logic [63:0]  dep_j1;
+    logic [31:0]  dep_ridx;
     logic [31:0]  dep_idx;
-    logic [31:0]  dep_area, dep_spos, dep_z, dep_ridx;
+    logic [31:0]  dep_area, dep_spos, dep_z;
     logic         dep_can, dep_self;
 
     // Overlapped next-block send.
@@ -77,7 +78,6 @@ module argon2_fill_ctrl #(
     logic        nxt_sent;
     logic        nxt_skip;
 
-    // Write FIFO 32 deep streaming
     localparam int WB_DEPTH = 32;
     logic [511:0] wb_data [0:WB_DEPTH-1];
     logic [ADDR_W-1:0] wb_addr [0:WB_DEPTH-1];
@@ -210,6 +210,15 @@ module argon2_fill_ctrl #(
                    && !pref_issued && !pref_accepted
                    && !dep_self;
 
+    logic a_init, a_start, a_busy, a_done;
+    argon2_addr_gen #(.N_P(N_P)) u_addr (
+        .clk(clk), .rst_n(rst_n), .init(a_init), .pass(pass_r), .lane(lane_id),
+        .slice(slice_r), .memory_blocks(memory_blocks), .time_cost(passes),
+        .type_i({30'd0, type_i}), .start(a_start), .busy(a_busy), .done(a_done),
+        .rd_idx(index_r[6:0]), .rd_j(addr_word),
+        .rd_idx_b(ag_rdb), .rd_j_b(addr_word_n)
+    );
+
     assign segment_length = lane_length / SYNC;
     assign independent    = (type_i == 2'd1) || (type_i == 2'd2 && pass_r == 0 && slice_r < 32'd2);
     assign with_xor       = (pass_r != 0);
@@ -237,7 +246,9 @@ module argon2_fill_ctrl #(
                            && (index_n2[6:0] != 0) && !wb_hit_ref_n_eff;
 
     always @(posedge clk or negedge rst_n) begin
-
+        logic rd_handshake;
+        logic wb_push, wb_pop;
+        logic [5:0] next_wb_count;
         if (!rst_n) begin
             state <= IDLE; done <= 0;
             pass_r <= 0; slice_r <= 0; index_r <= 0;
@@ -274,7 +285,8 @@ module argon2_fill_ctrl #(
 
             done <= 0; a_init <= 0; a_start <= 0;
 
-            if (mem_rd_valid && mem_rd_ready) begin
+            rd_handshake = mem_rd_valid && mem_rd_ready;
+            if (rd_handshake) begin
                 if (pref_issued && !pref_accepted) pref_accepted <= 1;
                 else if (dest_issued && !dest_accepted) dest_accepted <= 1;
                 else if (dep_issued && !dep_accepted) dep_accepted <= 1;
@@ -341,7 +353,7 @@ module argon2_fill_ctrl #(
                             for (int i=0; i<16; i++) prev_q[i] <= cache_q[i];
                             state <= COMPRESS;
                         end else begin
-                            mem_rd_addr <= prev_idx; mem_rd_valid <= 1; state <= ISSUE_PREV;
+                             mem_rd_addr <= prev_idx; mem_rd_valid <= 1; state <= ISSUE_PREV;
                         end
                     end else if (independent) begin
                         if (pref_issued || dest_issued || mem_rd_valid) state <= DISPATCH;
