@@ -497,7 +497,7 @@ module argon2_fill_ctrl #(
                             mem_rd_valid <= 1'b1;
                             state <= ISSUE_REF;
                         end
-                    } else if (!independent && dep_ready && (dep_idx == index_r)
+                    end else if (!independent && dep_ready && (dep_idx == index_r)
                                  && cache_valid && (pass_r == 32'd0)) begin
                         for (int i=0;i<16;i = i + 1) begin
                             ref_q[i]  <= dep_q[i];
