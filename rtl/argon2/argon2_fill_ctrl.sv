@@ -362,7 +362,7 @@ module argon2_fill_ctrl #(
             end
             // Collect the early dep response in ANY state once accepted, so
             // a state transition mid-burst cannot drop its trailing beats.
-            if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued)) begin
+            if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued) && !(state == COLLECT_REF || state == COLLECT_PREV || state == COLLECT_DEST)) begin
                 if (mem_rd_data_v) begin
                     dep_q[dep_beat] <= mem_rd_data;
                     if (mem_rd_last || dep_beat == 5'd15) begin
