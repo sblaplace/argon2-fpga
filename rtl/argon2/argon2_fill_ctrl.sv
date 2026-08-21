@@ -271,6 +271,8 @@ module argon2_fill_ctrl #(
         logic rd_handshake;
         logic wb_push, wb_pop;
         logic [5:0] next_count, next_wptr, next_rptr;
+        logic wb_push, wb_pop;
+        logic [5:0] next_count, next_wptr, next_rptr;
         if (!rst_n) begin
             state <= IDLE;
             done  <= 1'b0;
@@ -338,39 +340,23 @@ module argon2_fill_ctrl #(
             done <= 1'b0;
             a_init <= 1'b0;
             a_start <= 1'b0;
-            rd_handshake = mem_rd_valid && mem_rd_ready;
-            if (rd_handshake) begin
-                if (pref_issued && !pref_accepted) begin
-                    pref_accepted <= 1'b1;
-                    if (with_xor && !dest_last_blk && !dest_issued) begin
-                        mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
-                        dest_issued  <= 1'b1;
-                        dest_beat    <= 5'd0;
-                    end else begin
-                        mem_rd_valid <= 1'b0;
-                    end
-                end else if (dest_issued && !dest_accepted) begin
-                    dest_accepted <= 1'b1;
-                    mem_rd_valid  <= 1'b0;
-                end else if (dep_issued && !dep_accepted) begin
-                    dep_accepted <= 1'b1;
-                    mem_rd_valid <= 1'b0;
+
+            if (pref_issued && !pref_accepted && mem_rd_valid && mem_rd_ready) begin
+                pref_accepted <= 1'b1;
+                if (with_xor && !dest_last_blk && !dest_issued) begin
+                    mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
+                    mem_rd_valid <= 1'b1;
+                    dest_issued  <= 1'b1;
+                    dest_beat    <= 5'd0;
                 end else begin
                     mem_rd_valid <= 1'b0;
                 end
-            end
-            // Collect the early dep response in ANY state once accepted, so
-            // a state transition mid-burst cannot drop its trailing beats.
-            if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued)) begin
-                if (mem_rd_data_v) begin
-                    dep_q[dep_beat] <= mem_rd_data;
-                    if (mem_rd_last || dep_beat == 5'd15) begin
-                        dep_ready    <= 1'b1;
-                        dep_accepted <= 1'b0;
-                        dep_beat     <= 5'd0;
-                    end else dep_beat <= dep_beat + 5'd1;
-                end
+            end else if (dest_issued && !dest_accepted && mem_rd_valid && mem_rd_ready) begin
+                dest_accepted <= 1'b1;
+                mem_rd_valid  <= 1'b0;
+            end else if (dep_issued && !dep_accepted && mem_rd_valid && mem_rd_ready) begin
+                dep_accepted <= 1'b1;
+                mem_rd_valid <= 1'b0;
             end
 
             if (pref_issued && pref_accepted && !pref_ready) begin
@@ -390,6 +376,16 @@ module argon2_fill_ctrl #(
                         dest_done <= 1'b1;
                         dest_beat <= 5'd0;
                     end else dest_beat <= dest_beat + 5'd1;
+                end
+            end
+            if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued)) begin
+                if (mem_rd_data_v) begin
+                    dep_q[dep_beat] <= mem_rd_data;
+                    if (mem_rd_last || dep_beat == 5'd15) begin
+                        dep_ready    <= 1'b1;
+                        dep_accepted <= 1'b0;
+                        dep_beat     <= 5'd0;
+                    end else dep_beat <= dep_beat + 5'd1;
                 end
             end
 
