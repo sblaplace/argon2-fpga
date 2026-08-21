@@ -22,13 +22,13 @@ module argon2_fill_ctrl #(
     input  logic              sync_ack,
     output logic              mem_rd_valid,
     input  logic              mem_rd_ready,
-    output logic  mem_rd_addr,
+    output logic [ADDR_W-1:0] mem_rd_addr,
     input  logic              mem_rd_data_v,
     input  logic [511:0]      mem_rd_data,
     input  logic              mem_rd_last,
     output logic              mem_wr_valid,
     input  logic              mem_wr_ready,
-    output logic  mem_wr_addr,
+    output logic [ADDR_W-1:0] mem_wr_addr,
     output logic [511:0]      mem_wr_data,
     output logic              mem_wr_last,
     output logic [4:0]        state_o
@@ -52,7 +52,7 @@ module argon2_fill_ctrl #(
     logic [511:0] dest_work_q [0:15];
     logic [511:0] pref_q [0:15];
     logic [511:0] cache_q [0:15];
-    logic  cache_addr;
+    logic [ADDR_W-1:0] cache_addr;
     logic         cache_valid;
     logic         dstream;
     logic [4:0]   beat;
@@ -81,7 +81,7 @@ module argon2_fill_ctrl #(
     // Write FIFO 32 deep streaming
     localparam int WB_DEPTH = 32;
     logic [511:0] wb_data [0:WB_DEPTH-1];
-    logic  wb_addr [0:WB_DEPTH-1];
+    logic [ADDR_W-1:0] wb_addr [0:WB_DEPTH-1];
     logic         wb_last [0:WB_DEPTH-1];
     logic [5:0]   wb_wptr, wb_rptr;
     logic [5:0]   wb_count;
