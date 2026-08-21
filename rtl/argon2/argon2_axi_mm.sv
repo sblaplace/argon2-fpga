@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Block-addressed fill-controller port → AXI4-MM (512-bit).
 //
-// One 16-beat INCR burst per 1 KiB Argon2 block. Supports up to two
-// outstanding reads (e.g. pref + dest). Read and write channels are
-// independent so a prefetch can return while a write burst is in flight.
+// One 16-beat INCR burst per 1 KiB Argon2 block. One outstanding read
+// (matches original core). Read and write channels are independent
+// so a prefetch can return while a write burst is in flight.
 
 `timescale 1ns / 1ps
 
@@ -74,14 +74,12 @@ module argon2_axi_mm #(
 );
     localparam int AXI_SIZE = $clog2(AXI_DATA_W / 8);
 
-    logic [1:0] rd_count;
+    logic rd_pend;
     logic wr_aw_sent;
     logic wr_b_wait;
 
-    // Allow up to 2 outstanding reads. Block AR issue if we already have one
-    // pending address handshake to prevent overwriting m_axi_araddr.
-    assign mem_rd_ready = (rd_count < 2'd2) && !m_axi_arvalid;
-    assign m_axi_rready = (rd_count != 2'd0);
+    assign mem_rd_ready = !rd_pend && !m_axi_arvalid;
+    assign m_axi_rready = rd_pend;
     assign mem_rd_data_v = m_axi_rvalid && m_axi_rready;
     assign mem_rd_data   = m_axi_rdata;
     assign mem_rd_last   = m_axi_rlast;
@@ -112,9 +110,8 @@ module argon2_axi_mm #(
     assign m_axi_arqos   = 4'b0000;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        logic [1:0] next_rd_count;
         if (!rst_n) begin
-            rd_count      <= 2'd0;
+            rd_pend       <= 1'b0;
             m_axi_arvalid <= 1'b0;
             m_axi_araddr  <= '0;
             wr_aw_sent    <= 1'b0;
@@ -122,20 +119,15 @@ module argon2_axi_mm #(
             m_axi_awvalid <= 1'b0;
             m_axi_awaddr  <= '0;
         end else begin
-
-            next_rd_count = rd_count;
             if (mem_rd_valid && mem_rd_ready) begin
                 m_axi_arvalid <= 1'b1;
                 m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
-                next_rd_count = next_rd_count + 2'd1;
+                rd_pend       <= 1'b1;
             end
-            if (m_axi_rvalid && m_axi_rready && m_axi_rlast) begin
-                next_rd_count = next_rd_count - 2'd1;
-            end
-            rd_count <= next_rd_count;
-
             if (m_axi_arvalid && m_axi_arready)
                 m_axi_arvalid <= 1'b0;
+            if (m_axi_rvalid && m_axi_rready && m_axi_rlast)
+                rd_pend <= 1'b0;
 
             if (mem_wr_valid && !wr_aw_sent && !wr_b_wait && !m_axi_awvalid) begin
                 m_axi_awvalid <= 1'b1;

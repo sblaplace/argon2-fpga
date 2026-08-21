@@ -131,11 +131,7 @@ module argon2_fill_ctrl #(
     logic         c_out_valid, c_out_ready, c_out_last;
     logic [511:0] c_out_data;
 
-    // Streaming inputs to the compressor. During WRITE with the overlapped
-    // send active (nxt_sending), the next block's data streams in lockstep
-    // with the drain beats starting on the FIRST output beat: prev forwards
-    // the current output beat (block N's output = block N+1's prev), ref
-    // comes from the prefetched ref_q copy.
+    // Streaming inputs to the compressor.
     assign nxt_sending = nxt_latched && !nxt_sent;
     assign c_in_valid = (state == COMPRESS) ? (dstream ? mem_rd_data_v : 1'b1)
                        : (state == WRITE)   ? (nxt_sending && c_out_valid && c_out_ready)
@@ -147,11 +143,8 @@ module argon2_fill_ctrl #(
     assign c_in_last  = (state == WRITE && nxt_sending) ? (nxt_beat == 5'd15) : (beat == 5'd15);
     assign c_out_ready = (state == WRITE) && (wb_count < WB_DEPTH);
 
-    // Overlap eligibility: independent addressing (argon2i / argon2id first
-    // half), the next ref already prefetched, prev available from the write
-    // cache, and not at a segment or address-window boundary. For pass > 0
-    // (with_xor), the dest block must also have been prefetched.
-    // Must be true before the drain starts so the send is aligned with drain beat 0.
+    // Overlap eligibility: independent addressing, next ref (and dest if needed) prefetched,
+    // prev in cache, and not at a boundary.
     assign nxt_ok = independent && pref_ready && cache_valid
                   && (!with_xor || dest_done)
                   && (index_r + 32'd1 < segment_length)
@@ -181,16 +174,13 @@ module argon2_fill_ctrl #(
     );
     logic [31:0] index_n, j1_n, ref_area_n, start_pos_n, z_n, ref_lane_n, ref_idx_n;
     logic        same_lane_n, can_prefetch, can_prefetch_n2;
-    logic        nxt_ok;         // overlap eligible before the drain starts
-    logic        nxt_sending;    // comb: overlapped send in progress
-    logic        nxt_issue2;     // comb: latch pulse (issue K+2 prefetch)
-    logic [31:0] ag_idx_n;       // u_area_n index: K+1, or K+2 during the latch
-    logic [6:0]  ag_rdb;         // addr_gen rd_idx_b: K+1, or K+2 during the latch
-    logic [31:0] index_n2;       // K+2 (= index_r + 2)
+    logic        nxt_ok;
+    logic        nxt_sending;
+    logic        nxt_issue2;
+    logic [31:0] ag_idx_n;
+    logic [6:0]  ag_rdb;
+    logic [31:0] index_n2;
 
-    // During the overlap latch the second address port is redirected to
-    // block K+2 so the K+2 prefetch can be issued before the drain even
-    // starts, letting every independent block chain (not every other one).
     assign index_n2    = index_n + 32'd1;
     assign nxt_issue2  = nxt_ok && !nxt_latched && !c_out_valid;
     assign ag_idx_n    = nxt_issue2 ? index_n2 : index_n;
@@ -261,14 +251,10 @@ module argon2_fill_ctrl #(
     assign same_lane_n    = (ref_lane_n == lane_id);
     assign ref_idx_n      = ref_lane_n * lane_length + z_n;
     assign can_prefetch   = independent && (index_n < segment_length) && (index_n[6:0] != 7'd0) && !wb_hit_ref_n_eff;
-    // Same rule for block K+2 (used to chain the overlapped prefetches).
-    // With nxt_issue2 the second address port already points at K+2, so
-    // wb_hit_ref_n_eff / ref_idx_n reflect K+2 during the latch pulse.
     assign can_prefetch_n2 = independent && (index_n2 < segment_length)
                            && (index_n2[6:0] != 7'd0) && !wb_hit_ref_n_eff;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        logic rd_handshake;
         logic wb_push, wb_pop;
         logic [5:0] next_count, next_wptr, next_rptr;
         if (!rst_n) begin
@@ -306,7 +292,6 @@ module argon2_fill_ctrl #(
             wb_count <= 6'd0;
             wb_wbeat <= 5'd0;
         end else begin
-            
             wb_push = (state == WRITE) && c_out_valid && c_out_ready;
             wb_pop  = mem_wr_valid && mem_wr_ready;
 
@@ -339,24 +324,30 @@ module argon2_fill_ctrl #(
             a_init <= 1'b0;
             a_start <= 1'b0;
 
-            if (pref_issued && !pref_accepted && mem_rd_valid && mem_rd_ready) begin
-                pref_accepted <= 1'b1;
-                if (with_xor && !dest_last_blk && !dest_issued) begin
-                    mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
-                    mem_rd_valid <= 1'b1;
-                    dest_issued  <= 1'b1;
-                    dest_beat    <= 5'd0;
+            // Address Handshake Logic
+            if (mem_rd_valid && mem_rd_ready) begin
+                if (pref_issued && !pref_accepted) begin
+                    pref_accepted <= 1'b1;
+                    if (with_xor && !dest_last_blk && !dest_issued) begin
+                        mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        dest_issued  <= 1'b1;
+                        dest_beat    <= 5'd0;
+                    end else begin
+                        mem_rd_valid <= 1'b0;
+                    end
+                end else if (dest_issued && !dest_accepted) begin
+                    dest_accepted <= 1'b1;
+                    mem_rd_valid  <= 1'b0;
+                end else if (dep_issued && !dep_accepted) begin
+                    dep_accepted <= 1'b1;
+                    mem_rd_valid <= 1'b0;
                 end else begin
                     mem_rd_valid <= 1'b0;
                 end
-            end else if (dest_issued && !dest_accepted && mem_rd_valid && mem_rd_ready) begin
-                dest_accepted <= 1'b1;
-                mem_rd_valid  <= 1'b0;
-            end else if (dep_issued && !dep_accepted && mem_rd_valid && mem_rd_ready) begin
-                dep_accepted <= 1'b1;
-                mem_rd_valid <= 1'b0;
             end
 
+            // Background Data Collection
             if (pref_issued && pref_accepted && !pref_ready) begin
                 if (mem_rd_data_v) begin
                     pref_q[pref_beat] <= mem_rd_data;
@@ -391,21 +382,11 @@ module argon2_fill_ctrl #(
                 IDLE: begin
                     sync_req <= 1'b0;
                     if (start) begin
-                        pass_r <= 32'd0;
-                        slice_r <= 32'd0;
-                        index_r <= 32'd2;
-                        pref_issued <= 1'b0;
-                        pref_ready <= 1'b0;
-                        pref_accepted <= 1'b0;
-                        nxt_latched <= 1'b0;
-                        nxt_beat    <= 5'd0;
-                        nxt_sent    <= 1'b0;
-                        nxt_skip    <= 1'b0;
+                        pass_r <= 32'd0; slice_r <= 32'd0; index_r <= 32'd2;
+                        pref_issued <= 1'b0; pref_ready <= 1'b0; pref_accepted <= 1'b0;
+                        nxt_latched <= 1'b0; nxt_beat <= 5'd0; nxt_sent <= 1'b0; nxt_skip <= 1'b0;
                         cache_valid <= 1'b0;
-                        wb_wptr <= 6'd0;
-                        wb_rptr <= 6'd0;
-                        wb_count <= 6'd0;
-                        wb_wbeat <= 5'd0;
+                        wb_wptr <= 6'd0; wb_rptr <= 6'd0; wb_count <= 6'd0; wb_wbeat <= 5'd0;
                         state <= SEG_PREP;
                     end
                 end
@@ -413,14 +394,11 @@ module argon2_fill_ctrl #(
                     if (pass_r == passes) begin
                         if (wb_count != 0) state <= SEG_PREP;
                         else begin
-                            done <= 1'b1;
-                            state <= IDLE;
+                            done <= 1'b1; state <= IDLE;
                         end
                     end else if (index_r >= segment_length) state <= ADVANCE;
                     else if (independent) begin
-                        a_init <= 1'b1;
-                        a_start <= 1'b1;
-                        state <= ADDR_WAIT;
+                        a_init <= 1'b1; a_start <= 1'b1; state <= ADDR_WAIT;
                     end else state <= DISPATCH;
                 end
                 ADDR_WAIT: begin
@@ -432,21 +410,13 @@ module argon2_fill_ctrl #(
                 DISPATCH: begin
                     beat <= 5'd0;
                     if (dep_ready && (dep_idx != index_r)) begin
-                        dep_ready  <= 1'b0;
-                        dep_issued <= 1'b0;
-                        dep_seen   <= 1'b0;
-                        dep_idx    <= 32'd0;
+                        dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0; dep_idx <= 32'd0;
                     end
                     if (nxt_skip) begin
-                        nxt_skip    <= 1'b0;
-                        nxt_latched <= 1'b0;
-                        nxt_beat    <= 5'd0;
-                        nxt_sent    <= 1'b0;
+                        nxt_skip    <= 1'b0; nxt_latched <= 1'b0; nxt_beat    <= 5'd0; nxt_sent    <= 1'b0;
                         if (can_prefetch && !pref_issued && !pref_ready && !mem_rd_valid) begin
-                            mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
-                            pref_issued <= 1'b1;
-                            pref_beat <= 5'd0;
+                            mem_rd_addr <= ref_idx_n[ADDR_W-1:0]; mem_rd_valid <= 1'b1;
+                            pref_issued <= 1'b1; pref_beat <= 5'd0;
                         end
                         state <= WRITE;
                     end else if (independent && pref_ready) begin
@@ -457,7 +427,7 @@ module argon2_fill_ctrl #(
                         dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                     end else if (independent) begin
                         if (pref_issued || dest_issued) begin
-                             state <= DISPATCH; // Wait
+                             state <= DISPATCH;
                         end else if (cache_valid) begin
                             for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                             if (with_xor) begin
@@ -467,58 +437,38 @@ module argon2_fill_ctrl #(
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else begin
-                                    dstream <= 1'b1;
-                                    mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
-                                    state <= ISSUE_DEST;
+                                    dstream <= 1'b1; mem_rd_addr <= curr_idx[ADDR_W-1:0];
+                                    mem_rd_valid <= 1'b1; state <= ISSUE_DEST;
                                 end
                             end else begin
-                                dstream <= 1'b0;
-                                state <= COMPRESS;
+                                dstream <= 1'b0; state <= COMPRESS;
                             end
-                        end else if (wb_hit_ref_eff) begin
-                            state <= DISPATCH;
-                        end else begin
-                            mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
-                            state <= ISSUE_PREV;
+                        end else if (wb_hit_ref_eff) state <= DISPATCH;
+                        else begin
+                            mem_rd_addr <= ref_idx[ADDR_W-1:0]; mem_rd_valid <= 1'b1; state <= ISSUE_REF;
                         end
-                    end else if (!independent && dep_ready && (dep_idx == index_r)
-                                 && cache_valid && (pass_r == 32'd0)) begin
+                    end else if (!independent && dep_ready && (dep_idx == index_r) && cache_valid && (pass_r == 32'd0)) begin
                         for (int i=0;i<16;i = i + 1) begin
-                            ref_q[i]  <= dep_q[i];
-                            prev_q[i] <= cache_q[i];
+                            ref_q[i]  <= dep_q[i]; prev_q[i] <= cache_q[i];
                         end
-                        dep_ready  <= 1'b0;
-                        dep_issued <= 1'b0;
-                        dep_seen   <= 1'b0;
-                        dep_idx    <= 32'd0;
-                        dstream    <= 1'b0;
-                        state      <= COMPRESS;
+                        dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
+                        dep_idx <= 32'd0; dstream <= 1'b0; state <= COMPRESS;
                     end else if (cache_valid) begin
                         for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
-                        dstream <= 1'b0;
-                        state <= DREF_SETTLE;
+                        dstream <= 1'b0; state <= DREF_SETTLE;
                     end else if (pref_issued || dest_issued || dep_issued) begin
                         state <= DISPATCH;
                     end else begin
-                        dstream <= 1'b0;
-                        mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
-                        state <= ISSUE_PREV;
+                        dstream <= 1'b0; mem_rd_addr <= prev_idx[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1; state <= ISSUE_PREV;
                     end
                 end
                 DREF_SETTLE: begin
-                    if (pref_issued || dest_issued || dep_issued) begin
-                        state <= DREF_SETTLE;
-                    end else if (wb_hit_ref_eff) begin
-                        state <= DREF_SETTLE;
-                    end else begin
-                        mem_rd_addr <= ref_idx[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
-                        state <= ISSUE_REF;
-                        dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
-                        dep_idx <= 32'd0;
+                    if (pref_issued || dest_issued || dep_issued) state <= DREF_SETTLE;
+                    else if (wb_hit_ref_eff) state <= DREF_SETTLE;
+                    else begin
+                        mem_rd_addr <= ref_idx[ADDR_W-1:0]; mem_rd_valid <= 1'b1; state <= ISSUE_REF;
+                        dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0; dep_idx <= 32'd0;
                     end
                 end
                 DEST_WAIT: begin
@@ -531,8 +481,7 @@ module argon2_fill_ctrl #(
                 end
                 ISSUE_REF: begin
                     if (mem_rd_ready) begin
-                        mem_rd_valid <= 1'b0;
-                        state <= COLLECT_REF;
+                        mem_rd_valid <= 1'b0; state <= COLLECT_REF;
                     end
                 end
                 COLLECT_REF: begin
@@ -541,32 +490,25 @@ module argon2_fill_ctrl #(
                         if (mem_rd_last || beat == 5'd15) begin
                             beat <= 5'd0;
                             if (independent) begin
-                                mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                                mem_rd_valid <= 1'b1;
-                                state <= ISSUE_PREV;
+                                mem_rd_addr <= prev_idx[ADDR_W-1:0]; mem_rd_valid <= 1'b1; state <= ISSUE_PREV;
                             end else if (with_xor) begin
                                 if (dest_done) begin
-                                    dstream <= 1'b0;
-                                    for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
+                                    dstream <= 1'b0; for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else begin
-                                    dstream <= 1'b1;
-                                    mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
-                                    state <= ISSUE_DEST;
+                                    dstream <= 1'b1; mem_rd_addr <= curr_idx[ADDR_W-1:0];
+                                    mem_rd_valid <= 1'b1; state <= ISSUE_DEST;
                                 end
                             end else begin
                                 state <= COMPRESS;
-                                dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                             end
                         end else beat <= beat + 5'd1;
                     end
                 end
                 ISSUE_PREV: begin
                     if (mem_rd_ready) begin
-                        mem_rd_valid <= 1'b0;
-                        state <= COLLECT_PREV;
+                        mem_rd_valid <= 1'b0; state <= COLLECT_PREV;
                     end
                 end
                 COLLECT_PREV: begin
@@ -577,36 +519,28 @@ module argon2_fill_ctrl #(
                             if (!independent) begin
                                 if (wb_hit_ref_eff) state <= DREF_SETTLE; else if (pref_issued || dest_issued || dep_issued) state <= DREF_SETTLE;
                                 else begin
-                                    mem_rd_addr <= ref_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
-                                    state <= ISSUE_REF;
+                                    mem_rd_addr <= ref_idx[ADDR_W-1:0]; mem_rd_valid <= 1'b1; state <= ISSUE_REF;
                                 end
                             end else if (with_xor) begin
                                 if (dest_done) begin
-                                    dstream <= 1'b0;
-                                    for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
+                                    dstream <= 1'b0; for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else if (dest_issued) begin
-                                    dstream <= 1'b0;
-                                    state <= DEST_WAIT;
+                                    dstream <= 1'b0; state <= DEST_WAIT;
                                 end else begin
-                                    dstream <= 1'b1;
-                                    mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
-                                    state <= ISSUE_DEST;
+                                    dstream <= 1'b1; mem_rd_addr <= curr_idx[ADDR_W-1:0];
+                                    mem_rd_valid <= 1'b1; state <= ISSUE_DEST;
                                 end
                             end else begin
                                 state <= COMPRESS;
-                                dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                             end
                         end else beat <= beat + 5'd1;
                     end
                 end
                 ISSUE_DEST: begin
                     if (mem_rd_ready) begin
-                        mem_rd_valid <= 1'b0;
-                        state <= dstream ? COMPRESS : COLLECT_DEST;
+                        mem_rd_valid <= 1'b0; state <= dstream ? COMPRESS : COLLECT_DEST;
                     end
                 end
                 COLLECT_DEST: begin
@@ -622,104 +556,50 @@ module argon2_fill_ctrl #(
                 end
                 COMPRESS: begin
                     if (can_prefetch && !pref_issued && !pref_ready && !mem_rd_valid) begin
-                        mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
-                        pref_issued <= 1'b1;
-                        pref_beat <= 5'd0;
+                        mem_rd_addr <= ref_idx_n[ADDR_W-1:0]; mem_rd_valid <= 1'b1;
+                        pref_issued <= 1'b1; pref_beat <= 5'd0;
                     end
                     if (c_in_valid && c_in_ready) begin
                         if (beat == 5'd15) begin
-                            beat <= 5'd0;
-                            wb_wbeat <= 5'd0;
-                            state <= WRITE;
-                            // Re-arm the dependent early-ref capture for this
-                            // new block; any dep not consumed by the previous
-                            // block is stale.
-                            dep_seen   <= 1'b0;
-                            dep_issued <= 1'b0;
-                            dep_ready  <= 1'b0;
-                            dep_accepted <= 1'b0;
+                            beat <= 5'd0; wb_wbeat <= 5'd0; state <= WRITE;
+                            dep_seen <= 1'b0; dep_issued <= 1'b0; dep_ready <= 1'b0; dep_accepted <= 1'b0;
                         end else beat <= beat + 5'd1;
                     end
                 end
                 WRITE: begin
                     if (c_out_valid && c_out_ready && !c_out_last && !dep_seen) begin
-                        dep_j1   <= c_out_data[63:0];
-                        dep_seen <= 1'b1;
-                        dep_idx  <= index_n;
+                        dep_j1   <= c_out_data[63:0]; dep_seen <= 1'b1; dep_idx  <= index_n;
                     end
                     if (dep_can) begin
-                        mem_rd_addr <= dep_ridx[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
-                        dep_issued <= 1'b1;
-                        dep_beat <= 5'd0;
+                        mem_rd_addr <= dep_ridx[ADDR_W-1:0]; mem_rd_valid <= 1'b1;
+                        dep_issued <= 1'b1; dep_beat <= 5'd0;
                     end
-                    // Latch overlap eligibility while the drain is still
-                    // pending and copy the prefetched ref into ref_q (the
-                    // block we will stream next). Never latch after the
-                    // drain has started — the send must start on drain
-                    // beat 0 so it finishes exactly with the drain.
                     if (nxt_ok && !nxt_latched && !c_out_valid) begin
-                        nxt_latched <= 1'b1;
-                        nxt_beat    <= 5'd0;
+                        nxt_latched <= 1'b1; nxt_beat    <= 5'd0;
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         if (with_xor) for (int i=0;i<16;i = i + 1) dest_work_q[i] <= dest_q[i];
-                        // The prefetched ref for this block is consumed by
-                        // the copy: clear the handshake flags so ADVANCE
-                        // does not stall. Immediately issue the K+2 prefetch
-                        // (the second addr port is redirected to K+2 during
-                        // this cycle): it completes before the next drain
-                        // starts, so every independent block can overlap.
-                        pref_ready    <= 1'b0;
-                        pref_issued   <= 1'b0;
-                        pref_accepted <= 1'b0;
-                        pref_beat     <= 5'd0;
-                        dest_done     <= 1'b0;
-                        dest_issued   <= 1'b0;
-                        dest_accepted <= 1'b0;
-                        dest_beat     <= 5'd0;
+                        pref_ready <= 1'b0; pref_issued <= 1'b0; pref_accepted <= 1'b0; pref_beat <= 5'd0;
+                        dest_done <= 1'b0; dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_beat <= 5'd0;
                         if (can_prefetch_n2 && !mem_rd_valid) begin
-                            mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
-                            pref_issued <= 1'b1;
-                            pref_beat   <= 5'd0;
+                            mem_rd_addr <= ref_idx_n[ADDR_W-1:0]; mem_rd_valid <= 1'b1;
+                            pref_issued <= 1'b1; pref_beat <= 5'd0;
                         end
                     end
-
-                    // Advance the send in lockstep with the drain beats,
-                    // starting on the first output beat (nxt_sending is
-                    // combinational, so the first beat transfers on the
-                    // same cycle as the first drain handshake).
                     if (nxt_sending && c_in_ready && c_out_valid && c_out_ready) begin
-                        if (nxt_beat == 5'd15) begin
-                            nxt_sent <= 1'b1;
-                        end else begin
-                            nxt_beat <= nxt_beat + 5'd1;
-                        end
+                        if (nxt_beat == 5'd15) nxt_sent <= 1'b1;
+                        else nxt_beat <= nxt_beat + 5'd1;
                     end
-
                     if (c_out_valid && c_out_ready) begin
                         if (c_out_last) begin
-                            // If the overlapped send finished with the drain,
-                            // the next DISPATCH must skip the data setup.
                             if (nxt_sending) nxt_skip <= 1'b1;
-                            nxt_latched <= 1'b0;
-                            state       <= ADVANCE;
+                            nxt_latched <= 1'b0; state <= ADVANCE;
                         end
                     end
                 end
                 ADVANCE: begin
-                    // Let an in-flight early dep for the next block finish
-                    // before issuing any other read (single R channel).
-                    if (dep_issued && !dep_ready && (dep_idx == index_n))
-                        state <= ADVANCE;
+                    if (dep_issued && !dep_ready && (dep_idx == index_n)) state <= ADVANCE;
                     else if (nxt_skip) begin
-                        // Overlapped block: no boundary can be pending (the
-                        // overlap gating guarantees mid-segment / mid-window)
-                        // and the in-flight K+2 prefetch is not consumed by
-                        // DISPATCH[skip], so advance straight to it.
-                        index_r <= index_r + 32'd1;
-                        state   <= DISPATCH;
+                        index_r <= index_r + 32'd1; state <= DISPATCH;
                     end else if ((pref_issued && !pref_ready) || (dest_issued && !dest_done)) state <= ADVANCE;
                     else if (index_r >= segment_length || index_r + 32'd1 == segment_length) begin
                         if (wb_count != 0) state <= ADVANCE;
@@ -728,22 +608,19 @@ module argon2_fill_ctrl #(
                             dep_issued <= 1'b0; dep_ready <= 1'b0; dep_accepted <= 1'b0;
                             dep_seen <= 1'b0; dep_idx <= 32'd0;
                             if (lanes > 32'd1) begin
-                                sync_req <= 1'b1;
-                                state <= SLICE_SYNC;
+                                sync_req <= 1'b1; state <= SLICE_SYNC;
                             end else begin
                                 if (slice_r + 32'd1 == 32'd4) begin
                                     slice_r <= 32'd0; pass_r <= pass_r + 32'd1;
                                 end else slice_r <= slice_r + 32'd1;
-                                index_r <= 32'd0;
-                                state <= SEG_PREP;
+                                index_r <= 32'd0; state <= SEG_PREP;
                             end
                         end
                     end else begin
                         index_r <= index_r + 32'd1;
                         if (independent && ((index_r + 32'd1) & 32'd127) == 32'd0) begin
                             pref_issued <= 1'b0; pref_ready <= 1'b0; pref_accepted <= 1'b0;
-                            a_start <= 1'b1;
-                            state <= ADDR_WAIT;
+                            a_start <= 1'b1; state <= ADDR_WAIT;
                         end else state <= DISPATCH;
                     end
                 end
@@ -756,8 +633,7 @@ module argon2_fill_ctrl #(
                             if (slice_r + 32'd1 == 32'd4) begin
                                 slice_r <= 32'd0; pass_r <= pass_r + 32'd1;
                             end else slice_r <= slice_r + 32'd1;
-                            index_r <= 32'd0;
-                            state <= SEG_PREP;
+                            index_r <= 32'd0; state <= SEG_PREP;
                         end
                     end
                 end
