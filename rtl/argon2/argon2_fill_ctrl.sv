@@ -362,7 +362,7 @@ module argon2_fill_ctrl #(
             end
             // Collect the early dep response in ANY state once accepted, so
             // a state transition mid-burst cannot drop its trailing beats.
-            if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued) && !(state == COLLECT_REF || state == COLLECT_PREV || state == COLLECT_DEST)) begin
+            if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued)) begin
                 if (mem_rd_data_v) begin
                     dep_q[dep_beat] <= mem_rd_data;
                     if (mem_rd_last || dep_beat == 5'd15) begin
@@ -370,6 +370,26 @@ module argon2_fill_ctrl #(
                         dep_accepted <= 1'b0;
                         dep_beat     <= 5'd0;
                     end else dep_beat <= dep_beat + 5'd1;
+                end
+            end
+
+            if (pref_issued && pref_accepted && !pref_ready) begin
+                if (mem_rd_data_v) begin
+                    pref_q[pref_beat] <= mem_rd_data;
+                    if (mem_rd_last || pref_beat == 5'd15) begin
+                        pref_ready <= 1'b1;
+                        pref_accepted <= 1'b0;
+                        pref_beat <= 5'd0;
+                    end else pref_beat <= pref_beat + 5'd1;
+                end
+            end
+            if (dest_issued && dest_accepted && !dest_done && (pref_ready || !pref_issued)) begin
+                if (mem_rd_data_v) begin
+                    dest_q[dest_beat] <= mem_rd_data;
+                    if (mem_rd_last || dest_beat == 5'd15) begin
+                        dest_done <= 1'b1;
+                        dest_beat <= 5'd0;
+                    end else dest_beat <= dest_beat + 5'd1;
                 end
             end
 
@@ -424,11 +444,6 @@ module argon2_fill_ctrl #(
                         dep_idx    <= 32'd0;
                     end
                     if (nxt_skip) begin
-                        // The next block was already streamed into the
-                        // compressor during the previous drain (overlapped
-                        // send): skip the data setup, issue the following
-                        // block's prefetch here (there is no COMPRESS for
-                        // this block), and wait for its drain.
                         nxt_skip    <= 1'b0;
                         nxt_latched <= 1'b0;
                         nxt_beat    <= 5'd0;
@@ -443,7 +458,13 @@ module argon2_fill_ctrl #(
                     end else if (independent && pref_ready) begin
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         pref_ready <= 1'b0; pref_issued <= 1'b0; pref_accepted <= 1'b0;
-                        if (cache_valid) begin
+                    end else if (dest_issued && dest_done) begin
+                        for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
+                        dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
+                    end else if (independent) begin
+                        if (pref_issued || dest_issued) begin
+                             state <= DISPATCH; // Wait
+                        end else if (cache_valid) begin
                             for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                             if (with_xor) begin
                                 if (dest_done) begin
@@ -451,9 +472,6 @@ module argon2_fill_ctrl #(
                                     for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
-                                end else if (dest_issued) begin
-                                    dstream <= 1'b0;
-                                    state <= DEST_WAIT;
                                 end else begin
                                     dstream <= 1'b1;
                                     mem_rd_addr <= curr_idx[ADDR_W-1:0];
@@ -463,23 +481,13 @@ module argon2_fill_ctrl #(
                             end else begin
                                 dstream <= 1'b0;
                                 state <= COMPRESS;
-                                dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                             end
-                        end else if (pref_issued || dest_issued) begin
-                            state <= DISPATCH; // Wait for background prefetch
+                        end else if (wb_hit_ref_eff) begin
+                            state <= DISPATCH;
                         end else begin
                             mem_rd_addr <= prev_idx[ADDR_W-1:0];
                             mem_rd_valid <= 1'b1;
                             state <= ISSUE_PREV;
-                        end
-                    end else if (independent) begin
-                        if (wb_hit_ref_eff) state <= DISPATCH;
-                        else if (pref_issued || dest_issued) state <= DISPATCH;
-                        else begin
-                            dstream <= 1'b0;
-                            mem_rd_addr <= ref_idx[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
-                            state <= ISSUE_REF;
                         end
                     end else if (!independent && dep_ready && (dep_idx == index_r)
                                  && cache_valid && (pass_r == 32'd0)) begin

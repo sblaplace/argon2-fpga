@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Block-addressed fill-controller port → AXI4-MM (512-bit).
 //
-// One 16-beat INCR burst per 1 KiB Argon2 block. One outstanding read
-// (matches argon2_fill_ctrl). Read and write channels are independent
-// so a prefetch can return while a write burst is in flight — the fill
-// loop does exactly that.
-//
-// Sized for AWS F1 sh_ddr / Alveo HBM AXI-MM. `base_addr` is the byte
-// address of block 0 and must be 1 KiB-aligned.
+// One 16-beat INCR burst per 1 KiB Argon2 block. Supports up to two
+// outstanding reads (e.g. pref + dest). Read and write channels are
+// independent so a prefetch can return while a write burst is in flight.
 
 `timescale 1ns / 1ps
 
@@ -82,6 +78,8 @@ module argon2_axi_mm #(
     logic wr_aw_sent;
     logic wr_b_wait;
 
+    // Allow up to 2 outstanding reads. Block AR issue if we already have one
+    // pending address handshake to prevent overwriting m_axi_araddr.
     assign mem_rd_ready = (rd_count < 2'd2) && !m_axi_arvalid;
     assign m_axi_rready = (rd_count != 2'd0);
     assign mem_rd_data_v = m_axi_rvalid && m_axi_rready;
@@ -123,20 +121,15 @@ module argon2_axi_mm #(
             m_axi_awvalid <= 1'b0;
             m_axi_awaddr  <= '0;
         end else begin
-            logic rd_inc, rd_dec;
-            rd_inc = (mem_rd_valid && mem_rd_ready);
-            rd_dec = (m_axi_rvalid && m_axi_rready && m_axi_rlast);
-            case ({rd_inc, rd_dec})
-                2'b10: rd_count <= rd_count + 2'd1;
-                2'b01: rd_count <= rd_count - 2'd1;
-                2'b11: rd_count <= rd_count;
-                default: ;
-            endcase
-
-            if (rd_inc) begin
+            if (mem_rd_valid && mem_rd_ready) begin
                 m_axi_arvalid <= 1'b1;
                 m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
+                if (!(m_axi_rvalid && m_axi_rready && m_axi_rlast))
+                    rd_count <= rd_count + 2'd1;
+            end else if (m_axi_rvalid && m_axi_rready && m_axi_rlast) begin
+                rd_count <= rd_count - 2'd1;
             end
+
             if (m_axi_arvalid && m_axi_arready)
                 m_axi_arvalid <= 1'b0;
 
