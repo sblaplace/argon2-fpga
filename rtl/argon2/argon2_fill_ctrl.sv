@@ -575,7 +575,7 @@ module argon2_fill_ctrl #(
                         dep_issued <= 1'b1; dep_beat <= 5'd0;
                     end
                     if (nxt_ok && !nxt_latched && !c_out_valid) begin
-                        nxt_latched <= 1'b1; nxt_beat    <= 5'd0;
+                        nxt_latched <= 1'b1; nxt_beat <= 5'd0; nxt_sent <= 1'b0;
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         if (with_xor) for (int i=0;i<16;i = i + 1) dest_work_q[i] <= dest_q[i];
                         pref_ready <= 1'b0; pref_issued <= 1'b0; pref_accepted <= 1'b0; pref_beat <= 5'd0;
