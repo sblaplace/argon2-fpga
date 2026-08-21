@@ -38,6 +38,7 @@ SRC_tb_argon2_index     := $(RTL)/argon2/argon2_index.sv
 SRC_tb_argon2_compress  := $(ARGON2_G)
 SRC_tb_argon2_addr_gen  := $(RTL)/argon2/argon2_addr_gen.sv $(ARGON2_G)
 SRC_tb_argon2_fill      := $(FILL_RTL)
+SRC_tb_argon2_fill_discipline := $(FILL_RTL)
 SRC_tb_argon2_fill_rfc  := $(FILL_RTL) $(RTL)/argon2/argon2_fill_job.sv
 SRC_tb_argon2_axi       := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_axi_mm.sv \
@@ -98,10 +99,10 @@ run-tb_perf: tb_perf.out
 	$(VVP) $<
 endif
 
-.PHONY: all blake2b blamka index compress addr fill rfc axi cl perf vectors clean
+.PHONY: all blake2b blamka index compress addr fill discipline rfc axi cl perf vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
-all: blake2b blamka index compress addr fill rfc axi
+all: blake2b blamka index compress addr fill discipline rfc axi
 
 vectors: $(GEN)/fill_i_init.hex
 
@@ -115,6 +116,7 @@ index:   run-tb_argon2_index
 compress: run-tb_argon2_compress
 addr:    run-tb_argon2_addr_gen
 fill:    vectors run-tb_argon2_fill
+discipline: vectors run-tb_argon2_fill_discipline
 rfc:     vectors run-tb_argon2_fill_rfc
 axi:     vectors run-tb_argon2_axi
 
