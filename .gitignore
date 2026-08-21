@@ -37,3 +37,4 @@ sim/obj/
 .idea/
 .vscode/
 *~
+.tools/

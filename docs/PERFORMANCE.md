@@ -83,13 +83,57 @@ blocks free" and the old number.
 | Type      | cyc/blk (DDR4) | cand/s/lane | F1×4 | Bottleneck |
 |-----------|----------------|-------------|------|------------|
 | argon2i   | 61.8           | 1.029       | 4.12 | AXI bus ceiling (~1.07) |
-| argon2d   | 106.7          | 0.596       | 2.38 | COLLECT_REF — dependent ref, no prefetch |
-| argon2id  | 97.2           | 0.654       | 2.62 | mixed (first half overlaps, second is d-like) |
+| argon2d   | 97.2           | 0.654       | 2.62 | WRITE/COMPRESS (dependent ref now issued early, see below) |
+| argon2id  | 93.1           | 0.683       | 2.73 | mixed (first half overlaps; second uses early dependent ref) |
+
+(Before the early dependent-ref optimization the d/id rows were 106.7 /
+0.596 / 2.38 and 97.2 / 0.654 / 2.62; see "Early dependent ref" below.)
 
 argon2i benefits from 128-block G prefetch (full compute-latency early)
-and now from the chained overlapped send. argon2d has to wait for prev
-block to get J1||J2, then issue ref — the random read latency is on the
-critical path. The cache still kills the prev read, but ref remains.
+and now from the chained overlapped send. For data-dependent blocks,
+J1||J2 is only known from the previous block, so historically the random
+ref read sat on the critical path. The prev read is killed by the
+write-through cache, and **the ref read is now issued early** while block
+K drains (see below); COLLECT_REF dropped ~33% for both argon2d and
+argon2id.
+
+### Early dependent ref (argon2d / argon2id second half)
+
+The dependent reference address comes from word 0 of the just-written
+block K, so it is only known once K starts draining. There is no
+128-block prefetch as for argon2i. But after the first drain beat, the
+read port is otherwise idle for the rest of K's drain (writes use the
+independent write channel), so K+1's 16-beat ref read is issued then on
+the **same** read port and collected behind K's remaining drain + K+1's
+compression. At K+1's DISPATCH the buffer is usually already full; prev
+comes from the write-through cache, so K+1 goes straight to COMPRESS
+with no COLLECT_REF wait. This is the same "issue another read on the
+idle port" pattern as the existing early dest read, not a second AXI
+stream (a second stream on one shared R channel does not help — see
+"Rejected" below).
+
+Implementation in `argon2_fill_ctrl`: a second `ref_area`/`index`
+instance evaluates K+1's index from the captured `J1||J2`; the read is
+gated to pass-0 dependent blocks (pass>0 also needs a dest-xor read which
+would contend), with hazard skips when the target is K+1 itself
+(uncomputed) or uncommitted in the write FIFO. The response is collected
+in any FSM state once accepted (a transition mid-burst cannot drop its
+tail), and a stale/ late result is discarded at DISPATCH / DREF_SETTLE
+so the normal dependent path always remains correct. Measured effect
+(N_P=8, m'=4096, t=3, p=1, 200 MHz, cycle-accurate DDR4):
+
+| Type | before cyc/blk (cand/s, F1×4) | after cyc/blk (cand/s, F1×4) | Δ cand/s |
+|------|-------------------------------|------------------------------|----------|
+| argon2d  | 106.7 (0.596, 2.38) | 97.2 (0.654, 2.62) | +9.8% |
+| argon2id | 97.2 (0.654, 2.62) | 93.1 (0.683, 2.73) | +4.5% |
+| argon2i  | 61.8 (1.029, 4.12) | 61.8 (1.029, 4.12) | unchanged (gated off) |
+
+COLLECT_REF fell from ~399k to ~265k cycles (argon2d) and ~358k to
+~238k (argon2id) over the run. Bit-identical against the full KAT suite
+(`fill`, `fill_rfc`, `axi`, i/d/id, N_P=1 and N_P=8). The optimization
+is pass-0 only; extending it to pass>0 would need to arbitrate against
+the dest-xor read (the two could be tagged/prioritized, but pass>0 is a
+smaller fraction of the t=3 workload).
 
 The AXI bus ceiling at 200 MHz is 12.8 GB/s ÷ ~11.5 GB traffic per
 1 GiB candidate ≈ **1.07 cand/s/lane** (the shell's 512-bit @ 250 MHz
@@ -172,6 +216,82 @@ write handshakes.
   p=4 bench currently uses a shared simulation RAM and does not model this.
   Build the router and a four-memory p=4 perf bench before any hardware
   4×p=1 versus 1×p=4 comparison.
+
+
+## Rejected: second outstanding read for the argon2d dependent ref
+
+An obvious idea for closing the argon2d/argon2id COLLECT_REF gap is to
+mirror what the independent path does for prefetch: issue block K+1's
+dependent reference read early, while block K is still draining, and
+collect it in the background so its DRAM latency overlaps K's drain and
+K+1's compression. Unlike the 128-block G prefetch (whose addresses are
+known far ahead), the dependent ref's address is only known once K's
+first output beat produces J1||J2 — i.e. ~16 beats (plus P latency)
+before K finishes — so the window is tight, but it exists while the read
+port is otherwise idle (writes use the independent write channel).
+
+This was implemented end-to-end and verified bit-identical against the
+full KAT suite, then measured. It was **rejected**: a second outstanding
+read on a single AXI channel does not overlap a read's 16 R beats with
+anything else on the same R channel, so it mainly reorders/contends.
+
+### What was built
+
+* `argon2_axi_mm` / `argon2_fill_axi`: a second tagged read stream
+  (stream 0 = working read on ARID 0, stream 1 = early next-ref on
+  ARID 1), with RID-routed responses and RREADY interlock. Supports up
+  to two in-flight reads; a controller that ties stream 1 off gets the
+  original one-read behavior.
+* `argon2_fill_ctrl`: on the first drain beat of block K, capture word 0
+  (= J1||J2 for data-dependent blocks), compute K+1's reference index
+  through a second ref_area/index instance, issue it on stream 1, and
+  collect into a buffer. At K+1's DISPATCH, if the buffer is ready use
+  it with prev from the write-through cache; otherwise discard it (and
+  any late response) and take the normal dependent ref path. Hazard
+  gating skips the issue when the target is K/K+1 (not yet committed) or
+  is still uncommitted in the write FIFO.
+* Testbench models (`tb_axi_ram`, `tb_ddr4_ram`, and a zero-latency
+  ideal memory for the perf bench) were extended to accept two
+  outstanding ARIDs, hold each R beat until RREADY, and tag responses.
+
+### Result (N_P=8, m'=4096, t=3, p=1, 200 MHz, DDR4 model)
+
+| Type | baseline cyc/blk (cand/s/lane) | + 2nd early-ref stream |
+|------|--------------------------------|------------------------|
+| argon2d  | 106.7 (0.596) | 111.2 (0.572) |
+| argon2id |  97.2 (0.654) | 101.2 (0.628) |
+| argon2i  |  61.8 (1.029) |  60.7 (1.047, within noise) |
+
+F1 x4 (4 independent p=1 lanes) moved argon2d 2.38 -> 2.29 cand/s and
+argon2id 2.62 -> 2.51. The functional KATs (fill, fill_rfc, axi for
+argon2i/d/id at N_P=1 and N_P=8) all passed, so the regression is a
+throughput effect, not a correctness one.
+
+### Why it didn't help
+
+* **One shared read-data channel.** The dependent ref is a full 16-beat
+  burst. With only one AXI R channel, that burst cannot overlap any other
+  read's data beats — the second ARID gives out-of-order *issue* but not
+  out-of-order *data*. The "hidden" ref still consumes 16 R beats on the
+  critical resource; the 16-beat drain of K and the ref's 16 R beats
+  serialize rather than overlap.
+* **The window is too short.** By the time J1||J2 is visible (first beat
+  of K's drain), the port is free for only the remainder of the drain;
+  the ref's latency either does not fully fit before K+1 needs it, or
+  (when it does) it displaces another read the port would have done. The
+  COLLECT_REF drop was small and was eaten by AR arbitration, the second
+  ref-area/index datapath, and the fallback path.
+* **argon2i was unaffected** because it never takes the dependent path
+  (its refs come from the 128-block prefetcher), confirming the change
+  was correctly gated to data-dependent blocks.
+
+The takeaway: hiding the dependent ref needs either (a) genuinely
+independent read *data* bandwidth (a second memory port / channel, not
+just a second outstanding transaction), or (b) a way to know the
+dependent address earlier than K's first output beat, which Argon2's
+data-dependent ordering does not permit. A second outstanding read on the
+same AXI port is not that mechanism. Code was reverted; this note is kept
+so the experiment isn't repeated.
 
 ## Model caveats
 

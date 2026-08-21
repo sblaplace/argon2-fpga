@@ -60,6 +60,17 @@ module argon2_fill_ctrl #(
     logic         dest_issued, dest_accepted, dest_done;
     logic [4:0]   dest_beat;
 
+    // Dependent early next-ref, issued on the SAME read port while K drains
+    // (no second AXI stream; see docs/PERF "Rejected"). Pass 0 only.
+    logic [511:0] dep_q [0:15];
+    logic [4:0]   dep_beat;
+    logic         dep_issued, dep_accepted, dep_ready;
+    logic         dep_seen;
+    logic [63:0]  dep_j1;
+    logic [31:0]  dep_idx;
+    logic [31:0]  dep_area, dep_spos, dep_z, dep_ridx;
+    logic         dep_can, dep_self;
+
     // Overlapped next-block send during WRITE (drain): while the compressor
     // drains block N it also accepts block N+1's data into its idle buffer
     // (see argon2_compress double-buffering). The send streams in lockstep
@@ -193,6 +204,29 @@ module argon2_fill_ctrl #(
         .lane_length(lane_length), .ref_index(z_n)
     );
 
+    argon2_ref_area u_area_dep (
+        .pass(pass_r), .slice(slice_r), .index(index_n),
+        .lane_length(lane_length), .segment_length(segment_length),
+        .same_lane(), .ref_area(dep_area), .start_position(dep_spos)
+    );
+    argon2_index u_idx_dep (
+        .j1(dep_j1[31:0]), .ref_area(dep_area), .start_position(dep_spos),
+        .lane_length(lane_length), .ref_index(dep_z)
+    );
+    always_comb begin
+        if ((pass_r == 32'd0) && (slice_r == 32'd0))
+            dep_ridx = lane_id * lane_length + dep_z;
+        else
+            dep_ridx = (dep_j1[63:32] % lanes) * lane_length + dep_z;
+    end
+    assign dep_self = (dep_ridx == curr_idx + 32'd1);
+    assign dep_can  = !independent && (pass_r == 32'd0) && (state == WRITE)
+                   && dep_seen && (index_n < segment_length)
+                   && !dep_issued && !dep_ready && !dep_accepted
+                   && !dest_issued && !dest_accepted
+                   && !pref_issued && !pref_accepted
+                   && !mem_rd_valid && !dep_self;
+
     logic a_init, a_start, a_busy, a_done;
     argon2_addr_gen #(.N_P(N_P)) u_addr (
         .clk(clk), .rst_n(rst_n), .init(a_init), .pass(pass_r), .lane(lane_id),
@@ -259,6 +293,9 @@ module argon2_fill_ctrl #(
             dstream <= 1'b0;
             sync_req <= 1'b0;
             mem_rd_addr <= '0;
+            dep_beat <= 5'd0;
+            dep_issued <= 1'b0; dep_accepted <= 1'b0; dep_ready <= 1'b0;
+            dep_seen <= 1'b0; dep_j1 <= 64'd0; dep_idx <= 32'd0;
             wb_wptr <= 6'd0;
             wb_rptr <= 6'd0;
             wb_count <= 6'd0;
@@ -336,6 +373,23 @@ module argon2_fill_ctrl #(
                 end
             end
 
+            if (dep_issued && !dep_accepted && mem_rd_valid && mem_rd_ready) begin
+                dep_accepted <= 1'b1;
+                mem_rd_valid <= 1'b0;
+            end
+            // Collect the early dep response in ANY state once accepted, so
+            // a state transition mid-burst cannot drop its trailing beats.
+            if (dep_issued && dep_accepted && !dep_ready) begin
+                if (mem_rd_data_v) begin
+                    dep_q[dep_beat] <= mem_rd_data;
+                    if (mem_rd_last || dep_beat == 5'd15) begin
+                        dep_ready    <= 1'b1;
+                        dep_accepted <= 1'b0;
+                        dep_beat     <= 5'd0;
+                    end else dep_beat <= dep_beat + 5'd1;
+                end
+            end
+
             case (state)
                 IDLE: begin
                     sync_req <= 1'b0;
@@ -380,6 +434,12 @@ module argon2_fill_ctrl #(
                 end
                 DISPATCH: begin
                     beat <= 5'd0;
+                    if (dep_ready && (dep_idx != index_r)) begin
+                        dep_ready  <= 1'b0;
+                        dep_issued <= 1'b0;
+                        dep_seen   <= 1'b0;
+                        dep_idx    <= 32'd0;
+                    end
                     if (nxt_skip) begin
                         // The next block was already streamed into the
                         // compressor during the previous drain (overlapped
@@ -434,6 +494,18 @@ module argon2_fill_ctrl #(
                             mem_rd_valid <= 1'b1;
                             state <= ISSUE_REF;
                         end
+                    end else if (!independent && dep_ready && (dep_idx == index_r)
+                                 && cache_valid && (pass_r == 32'd0)) begin
+                        for (int i=0;i<16;i = i + 1) begin
+                            ref_q[i]  <= dep_q[i];
+                            prev_q[i] <= cache_q[i];
+                        end
+                        dep_ready  <= 1'b0;
+                        dep_issued <= 1'b0;
+                        dep_seen   <= 1'b0;
+                        dep_idx    <= 32'd0;
+                        dstream    <= 1'b0;
+                        state      <= COMPRESS;
                     end else if (cache_valid) begin
                         for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                         dstream <= 1'b0;
@@ -446,6 +518,8 @@ module argon2_fill_ctrl #(
                     end
                 end
                 DREF_SETTLE: begin
+                    dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
+                    dep_idx <= 32'd0;
                     if (wb_hit_ref_eff) state <= DREF_SETTLE;
                     else begin
                         mem_rd_addr <= ref_idx[ADDR_W-1:0];
@@ -560,10 +634,28 @@ module argon2_fill_ctrl #(
                             beat <= 5'd0;
                             wb_wbeat <= 5'd0;
                             state <= WRITE;
+                            // Re-arm the dependent early-ref capture for this
+                            // new block; any dep not consumed by the previous
+                            // block is stale.
+                            dep_seen   <= 1'b0;
+                            dep_issued <= 1'b0;
+                            dep_ready  <= 1'b0;
+                            dep_accepted <= 1'b0;
                         end else beat <= beat + 5'd1;
                     end
                 end
                 WRITE: begin
+                    if (c_out_valid && c_out_ready && !c_out_last && !dep_seen) begin
+                        dep_j1   <= c_out_data[63:0];
+                        dep_seen <= 1'b1;
+                        dep_idx  <= index_n;
+                    end
+                    if (dep_can) begin
+                        mem_rd_addr <= dep_ridx[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        dep_issued <= 1'b1;
+                        dep_beat <= 5'd0;
+                    end
                     // Latch overlap eligibility while the drain is still
                     // pending and copy the prefetched ref into ref_q (the
                     // block we will stream next). Never latch after the
@@ -614,7 +706,11 @@ module argon2_fill_ctrl #(
                     end
                 end
                 ADVANCE: begin
-                    if (nxt_skip) begin
+                    // Let an in-flight early dep for the next block finish
+                    // before issuing any other read (single R channel).
+                    if (dep_issued && !dep_ready && (dep_idx == index_n))
+                        state <= ADVANCE;
+                    else if (nxt_skip) begin
                         // Overlapped block: no boundary can be pending (the
                         // overlap gating guarantees mid-segment / mid-window)
                         // and the in-flight K+2 prefetch is not consumed by
@@ -626,6 +722,8 @@ module argon2_fill_ctrl #(
                         if (wb_count != 0) state <= ADVANCE;
                         else begin
                             pref_issued <= 1'b0; pref_ready <= 1'b0; pref_accepted <= 1'b0;
+                            dep_issued <= 1'b0; dep_ready <= 1'b0; dep_accepted <= 1'b0;
+                            dep_seen <= 1'b0; dep_idx <= 32'd0;
                             if (lanes > 32'd1) begin
                                 sync_req <= 1'b1;
                                 state <= SLICE_SYNC;
@@ -664,4 +762,5 @@ module argon2_fill_ctrl #(
             endcase
         end
     end
+
 endmodule
