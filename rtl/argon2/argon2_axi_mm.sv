@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Block-addressed fill-controller port → AXI4-MM (512-bit).
 //
-// One 16-beat INCR burst per 1 KiB Argon2 block. One outstanding read
-// (matches original core). Read and write channels are independent
-// so a prefetch can return while a write burst is in flight.
+// One 16-beat INCR burst per 1 KiB Argon2 block. One outstanding read.
 
 `timescale 1ns / 1ps
 
@@ -123,20 +121,21 @@ module argon2_axi_mm #(
                 m_axi_arvalid <= 1'b1;
                 m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
                 rd_pend       <= 1'b1;
-            end
-            if (m_axi_arvalid && m_axi_arready)
+            end else if (m_axi_arvalid && m_axi_arready) begin
                 m_axi_arvalid <= 1'b0;
+            end
+
             if (m_axi_rvalid && m_axi_rready && m_axi_rlast)
                 rd_pend <= 1'b0;
 
             if (mem_wr_valid && !wr_aw_sent && !wr_b_wait && !m_axi_awvalid) begin
                 m_axi_awvalid <= 1'b1;
                 m_axi_awaddr  <= base_addr + (AXI_ADDR_W'(mem_wr_addr) << 10);
-            end
-            if (m_axi_awvalid && m_axi_awready) begin
+            end else if (m_axi_awvalid && m_axi_awready) begin
                 m_axi_awvalid <= 1'b0;
                 wr_aw_sent    <= 1'b1;
             end
+
             if (m_axi_wvalid && m_axi_wready && m_axi_wlast) begin
                 wr_aw_sent <= 1'b0;
                 wr_b_wait  <= 1'b1;
