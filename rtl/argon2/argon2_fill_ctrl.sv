@@ -507,13 +507,16 @@ module argon2_fill_ctrl #(
                     end
                 end
                 DREF_SETTLE: begin
-                    dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
-                    dep_idx <= 32'd0;
-                    if (wb_hit_ref_eff) state <= DREF_SETTLE; else if (pref_issued || dest_issued || dep_issued) state <= DREF_SETTLE;
-                    else begin
+                    if (pref_issued || dest_issued || dep_issued) begin
+                        state <= DREF_SETTLE;
+                    end else if (wb_hit_ref_eff) begin
+                        state <= DREF_SETTLE;
+                    end else begin
                         mem_rd_addr <= ref_idx[ADDR_W-1:0];
                         mem_rd_valid <= 1'b1;
                         state <= ISSUE_REF;
+                        dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
+                        dep_idx <= 32'd0;
                     end
                 end
                 DEST_WAIT: begin
