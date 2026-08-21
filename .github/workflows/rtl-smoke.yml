@@ -1,15 +1,22 @@
 # rtl-smoke
 #
 # RTL smoke testbench harness. Installs Icarus Verilog on a hosted Linux
-# runner and runs every self-checking testbench under hdl/ via
-# scripts/run_tb.py. That runner fails unless each testbench (a) compiles and
+# runner and runs every self-checking testbench under sim/ via
+# scripts/run_tb.py. That runner fails unless each bench (a) compiles and
 # runs cleanly AND (b) prints the "PASS" marker — so this stays green only
 # when the RTL is genuinely self-verified, not silently empty.
 #
-# Gated on pull_request to main and pushes to main. This is the smallest CI
-# slice that is meaningful at the README-only stage; as real RTL lands, add
-# per-IP testbench jobs and Vivado synthesis/build jobs here, and consider
-# pinning the iverilog version.
+# The job runs the suite once per N_P value in RUN_TB_NP (a single job, so
+# the check keeps the single required context `testbenches` the repo
+# ruleset enforces; a job matrix would rename it to "testbenches (NP=...)"
+# and silently detach the required check). N_P>1 (parallel-G) is a distinct
+# RTL topology that a single-N_P run would never exercise; run_tb.py loops
+# over the values itself.
+#
+# iverilog is pinned to a fixed debian package so local-vs-CI version drift
+# (which has caused false reds and false greens) can't move the threshold.
+#
+# Gated on pull_request to main and pushes to main.
 
 name: rtl-smoke
 
@@ -21,15 +28,19 @@ on:
 
 jobs:
   testbenches:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      # Run the whole suite at N_P=1 and N_P=8 (parallel-G perf point).
+      # run_tb.py splits on space/comma. Changing this re-runs both.
+      RUN_TB_NP: "1 8"
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Install Icarus Verilog
+      - name: Install Icarus Verilog (pinned)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iverilog
+          sudo apt-get install -y --no-install-recommends iverilog=12.0-2build2
           iverilog -V
 
       - name: Run self-checking testbenches

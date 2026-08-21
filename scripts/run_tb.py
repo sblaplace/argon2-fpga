@@ -36,6 +36,14 @@ PASS_MARKER = "PASS"
 SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
                "fill", "rfc", "axi", "cl"]
 PER_TARGET_TIMEOUT = 120  # seconds; any bench here finishes in <30 s
+# N_P matrix: run the whole suite at every value in N_P_MATRIX (the Makefile
+# passes NP through to each bench via -PN_P). The KAT vectors are N_P-
+# independent, but the parallel-G path (N_P>1) is a distinct RTL topology that
+# a single-N_P run would never exercise. Default = [1]; override via
+# RUN_TB_NP (space/comma separated) env var, e.g. "1 8".
+N_P_MATRIX = [int(x) for x in
+              os.environ.get("RUN_TB_NP", "1").replace(",", " ").split()
+              if x.strip()] or [1]
 
 
 def gh_annotation(level, title, message):
@@ -108,17 +116,18 @@ def run_sim_suite():
     ok = True
     if not os.path.isdir(SIM_DIR):
         return ok
-    # One make per bench: a compile error, missing-PASS, or stall is
-    # attributed to the exact bench, and a stall can't block the rest of
-    # the job for more than the per-target timeout. (A bare `make -C sim`
+    # One make per (bench, N_P): a compile error, missing-PASS, or stall is
+    # attributed to the exact (bench, N_P), and a stall can't block the rest
+    # of the job for more than the per-target timeout. (A bare `make -C sim`
     # would also pick the Makefile's first rule — the perf bench — as the
-    # default goal.)
-    for tgt in SIM_TARGETS:
-        ok &= run_streaming(
-            ["make", "-C", SIM_DIR, tgt], cwd=ROOT,
-            timeout=PER_TARGET_TIMEOUT,
-            label=f"sim: make -C sim {tgt}", require_pass=True,
-        )
+    # default goal.) N_P comes via the Makefile `NP` var (-> -PN_P).
+    for np in N_P_MATRIX:
+        for tgt in SIM_TARGETS:
+            ok &= run_streaming(
+                ["make", "-C", SIM_DIR, tgt, f"NP={np}"], cwd=ROOT,
+                timeout=PER_TARGET_TIMEOUT,
+                label=f"sim: make -C sim {tgt} (N_P={np})", require_pass=True,
+            )
     return ok
 
 
