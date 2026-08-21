@@ -112,6 +112,7 @@ module argon2_axi_mm #(
     assign m_axi_arqos   = 4'b0000;
 
     always_ff @(posedge clk or negedge rst_n) begin
+        logic [1:0] next_rd_count;
         if (!rst_n) begin
             rd_count      <= 2'd0;
             m_axi_arvalid <= 1'b0;
@@ -121,14 +122,17 @@ module argon2_axi_mm #(
             m_axi_awvalid <= 1'b0;
             m_axi_awaddr  <= '0;
         end else begin
+
+            next_rd_count = rd_count;
             if (mem_rd_valid && mem_rd_ready) begin
                 m_axi_arvalid <= 1'b1;
                 m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
-                if (!(m_axi_rvalid && m_axi_rready && m_axi_rlast))
-                    rd_count <= rd_count + 2'd1;
-            end else if (m_axi_rvalid && m_axi_rready && m_axi_rlast) begin
-                rd_count <= rd_count - 2'd1;
+                next_rd_count = next_rd_count + 2'd1;
             end
+            if (m_axi_rvalid && m_axi_rready && m_axi_rlast) begin
+                next_rd_count = next_rd_count - 2'd1;
+            end
+            rd_count <= next_rd_count;
 
             if (m_axi_arvalid && m_axi_arready)
                 m_axi_arvalid <= 1'b0;
