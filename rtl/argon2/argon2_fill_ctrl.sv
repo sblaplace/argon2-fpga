@@ -303,6 +303,7 @@ module argon2_fill_ctrl #(
             wb_count <= 6'd0;
             wb_wbeat <= 5'd0;
         end else begin
+            logic rd_handshake;
             logic wb_push, wb_pop;
             logic [5:0] next_count, next_wptr, next_rptr;
             wb_push = (state == WRITE) && c_out_valid && c_out_ready;
@@ -336,8 +337,6 @@ module argon2_fill_ctrl #(
             done <= 1'b0;
             a_init <= 1'b0;
             a_start <= 1'b0;
-
-            logic rd_handshake;
             rd_handshake = mem_rd_valid && mem_rd_ready;
             if (rd_handshake) begin
                 if (pref_issued && !pref_accepted) begin
