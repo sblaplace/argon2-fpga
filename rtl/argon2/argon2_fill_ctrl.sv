@@ -261,7 +261,7 @@ module argon2_fill_ctrl #(
             dep_beat <= 0; dep_issued <= 0; dep_accepted <= 0; dep_ready <= 0;
             dep_seen <= 0; dep_j1 <= 0; dep_idx <= 0;
             wb_wptr <= 0; wb_rptr <= 0; wb_count <= 0; wb_wbeat <= 0;
-            mem_rd_valid <= 0; mem_wr_valid <= 0; a_init <= 0; a_start <= 0;
+            mem_rd_valid <= 0; a_init <= 0; a_start <= 0;
         end else begin
             wb_push = (state == WRITE) && c_out_valid && c_out_ready;
             wb_pop  = mem_wr_valid && mem_wr_ready;
