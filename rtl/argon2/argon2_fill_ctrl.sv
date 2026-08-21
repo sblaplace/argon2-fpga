@@ -67,8 +67,9 @@ module argon2_fill_ctrl #(
     logic         dep_issued, dep_accepted, dep_ready;
     logic         dep_seen;
     logic [63:0]  dep_j1;
+    logic [31:0]  dep_ridx;
     logic [31:0]  dep_idx;
-    logic [31:0]  dep_area, dep_spos, dep_z, dep_ridx;
+    logic [31:0]  dep_area, dep_spos, dep_z;
     logic         dep_can, dep_self;
 
     // Overlapped next-block send.
@@ -195,12 +196,13 @@ module argon2_fill_ctrl #(
         .j1(dep_j1[31:0]), .ref_area(dep_area), .start_position(dep_spos),
         .lane_length(lane_length), .ref_index(dep_z)
     );
-    always_comb begin
-        if ((pass_r == 32'd0) && (slice_r == 32'd0))
-            dep_ridx = lane_id * lane_length + dep_z;
-        else
-            dep_ridx = (dep_j1[63:32] % lanes) * lane_length + dep_z;
-    end
+
+    logic [31:0] dep_j1_hi;
+    assign dep_j1_hi = dep_j1[63:32];
+    assign dep_ridx = ((pass_r == 32'd0) && (slice_r == 32'd0)) ?
+                      (lane_id * lane_length + dep_z) :
+                      ((dep_j1_hi % lanes) * lane_length + dep_z);
+
     assign dep_self = (dep_ridx == curr_idx + 32'd1);
     assign dep_can  = !independent && (pass_r == 32'd0) && (state == WRITE)
                    && dep_seen && (index_n < segment_length)
@@ -245,6 +247,9 @@ module argon2_fill_ctrl #(
                            && (index_n2[6:0] != 7'd0) && !wb_hit_ref_n_eff;
 
     always_ff @(posedge clk or negedge rst_n) begin
+        logic rd_handshake;
+        logic wb_push, wb_pop;
+        logic [5:0] next_wb_count;
         if (!rst_n) begin
             state <= IDLE;
             done  <= 1'b0;
@@ -261,28 +266,33 @@ module argon2_fill_ctrl #(
             dep_seen <= 1'b0; dep_j1 <= 64'd0; dep_idx <= 32'd0;
             wb_wptr <= 6'd0; wb_rptr <= 6'd0; wb_count <= 6'd0; wb_wbeat <= 5'd0;
         end else begin
-            if (mem_wr_valid && mem_wr_ready) begin
+            wb_push = (state == WRITE) && c_out_valid && c_out_ready;
+            wb_pop  = mem_wr_valid && mem_wr_ready;
+            next_wb_count = wb_count;
+            if (wb_pop) begin
                 wb_rptr <= (wb_rptr == WB_DEPTH-1) ? 6'd0 : wb_rptr + 6'd1;
-                wb_count <= wb_count - 6'd1;
+                next_wb_count = next_wb_count - 6'd1;
             end
-            if ((state == WRITE) && c_out_valid && c_out_ready) begin
+            if (wb_push) begin
                 wb_data[wb_wptr] <= c_out_data;
                 wb_addr[wb_wptr] <= curr_idx[ADDR_W-1:0];
                 wb_last[wb_wptr] <= c_out_last;
                 cache_q[wb_wbeat] <= c_out_data;
                 wb_wptr <= (wb_wptr == WB_DEPTH-1) ? 6'd0 : wb_wptr + 6'd1;
-                wb_count <= (mem_wr_valid && mem_wr_ready) ? wb_count : wb_count + 6'd1;
+                next_wb_count = next_wb_count + 6'd1;
                 if (c_out_last) begin
                     cache_addr <= curr_idx[ADDR_W-1:0];
                     cache_valid <= 1'b1;
                     wb_wbeat <= 5'd0;
                 end else wb_wbeat <= wb_wbeat + 5'd1;
             end
+            wb_count <= next_wb_count;
 
             done <= 1'b0; a_init <= 1'b0; a_start <= 1'b0;
 
             // Address handshaking
-            if (mem_rd_valid && mem_rd_ready) begin
+            rd_handshake = mem_rd_valid && mem_rd_ready;
+            if (rd_handshake) begin
                 if (pref_issued && !pref_accepted) begin
                     pref_accepted <= 1'b1;
                     if (with_xor && !dest_last_blk && !dest_issued) begin
@@ -299,7 +309,7 @@ module argon2_fill_ctrl #(
             // Background collection
             if (pref_issued && pref_accepted && !pref_ready) begin
                 if (mem_rd_data_v) begin
-                    pref_q[pref_beat] <= mem_rd_data;
+                    pref_q[pref_beat[3:0]] <= mem_rd_data;
                     if (mem_rd_last || pref_beat == 15) begin
                         pref_ready <= 1'b1; pref_accepted <= 1'b0; pref_beat <= 5'd0;
                     end else pref_beat <= pref_beat + 1;
@@ -307,7 +317,7 @@ module argon2_fill_ctrl #(
             end
             if (dest_issued && dest_accepted && !dest_done && (pref_ready || !pref_issued)) begin
                 if (mem_rd_data_v) begin
-                    dest_q[dest_beat] <= mem_rd_data;
+                    dest_q[dest_beat[3:0]] <= mem_rd_data;
                     if (mem_rd_last || dest_beat == 15) begin
                         dest_done <= 1'b1; dest_beat <= 5'd0;
                     end else dest_beat <= dest_beat + 1;
@@ -315,7 +325,7 @@ module argon2_fill_ctrl #(
             end
             if (dep_issued && dep_accepted && !dep_ready && (pref_ready || !pref_issued) && (dest_done || !dest_issued)) begin
                 if (mem_rd_data_v) begin
-                    dep_q[dep_beat] <= mem_rd_data;
+                    dep_q[dep_beat[3:0]] <= mem_rd_data;
                     if (mem_rd_last || dep_beat == 15) begin
                         dep_ready <= 1'b1; dep_accepted <= 1'b0; dep_beat <= 5'd0;
                     end else dep_beat <= dep_beat + 1;
@@ -478,7 +488,7 @@ module argon2_fill_ctrl #(
                         if (nxt_beat == 15) nxt_sent <= 1; else nxt_beat <= nxt_beat + 1;
                     end
                     if (c_out_valid && c_out_ready && c_out_last) begin
-                        if (nxt_sending) nxt_skip <= 1; nxt_latched <= 0; state <= ADVANCE;
+                        if (nxt_sending || nxt_sent) nxt_skip <= 1; nxt_latched <= 0; state <= ADVANCE;
                     end
                 end
 
