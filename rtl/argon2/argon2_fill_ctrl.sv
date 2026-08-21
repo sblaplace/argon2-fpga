@@ -271,8 +271,6 @@ module argon2_fill_ctrl #(
         logic rd_handshake;
         logic wb_push, wb_pop;
         logic [5:0] next_count, next_wptr, next_rptr;
-        logic wb_push, wb_pop;
-        logic [5:0] next_count, next_wptr, next_rptr;
         if (!rst_n) begin
             state <= IDLE;
             done  <= 1'b0;
