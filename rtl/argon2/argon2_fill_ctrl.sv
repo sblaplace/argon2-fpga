@@ -456,7 +456,7 @@ module argon2_fill_ctrl #(
                             pref_beat <= 5'd0;
                         end
                         state <= WRITE;
-                    } else if (independent && pref_ready) begin
+                    end else if (independent && pref_ready) begin
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         pref_ready <= 1'b0; pref_issued <= 1'b0; pref_accepted <= 1'b0;
                         if (cache_valid) begin
@@ -488,9 +488,9 @@ module argon2_fill_ctrl #(
                             mem_rd_valid <= 1'b1;
                             state <= ISSUE_PREV;
                         end
-                    } else if (independent) begin
+                    end else if (independent) begin
                         if (wb_hit_ref_eff) state <= DISPATCH;
-                        else if (pref_issued || dest_issued) state <= DISPATCH; // Wait
+                        else if (pref_issued || dest_issued) state <= DISPATCH;
                         else begin
                             dstream <= 1'b0;
                             mem_rd_addr <= ref_idx[ADDR_W-1:0];
@@ -509,13 +509,13 @@ module argon2_fill_ctrl #(
                         dep_idx    <= 32'd0;
                         dstream    <= 1'b0;
                         state      <= COMPRESS;
-                    } else if (cache_valid) begin
+                    end else if (cache_valid) begin
                         for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                         dstream <= 1'b0;
                         state <= DREF_SETTLE;
                     end else if (pref_issued || dest_issued || dep_issued) begin
                         state <= DISPATCH;
-                    } else begin
+                    end else begin
                         dstream <= 1'b0;
                         mem_rd_addr <= prev_idx[ADDR_W-1:0];
                         mem_rd_valid <= 1'b1;
