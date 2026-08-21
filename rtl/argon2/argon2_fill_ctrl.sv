@@ -21,7 +21,7 @@ module argon2_fill_ctrl #(
     output logic              sync_req,
     input  logic              sync_ack,
     output logic [ADDR_W-1:0] mem_rd_addr,
-    input  logic              mem_rd_valid,
+    output logic              mem_rd_valid,
     input  logic              mem_rd_ready,
     input  logic              mem_rd_data_v,
     input  logic [511:0]      mem_rd_data,
