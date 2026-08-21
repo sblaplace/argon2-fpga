@@ -78,12 +78,12 @@ module argon2_axi_mm #(
 );
     localparam int AXI_SIZE = $clog2(AXI_DATA_W / 8);
 
-    logic rd_pend;
+    logic [1:0] rd_count;
     logic wr_aw_sent;
     logic wr_b_wait;
 
-    assign mem_rd_ready = !rd_pend && !m_axi_arvalid;
-    assign m_axi_rready = rd_pend;
+    assign mem_rd_ready = (rd_count < 2'd2) && !m_axi_arvalid;
+    assign m_axi_rready = (rd_count != 2'd0);
     assign mem_rd_data_v = m_axi_rvalid && m_axi_rready;
     assign mem_rd_data   = m_axi_rdata;
     assign mem_rd_last   = m_axi_rlast;
@@ -115,7 +115,7 @@ module argon2_axi_mm #(
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rd_pend       <= 1'b0;
+            rd_count      <= 2'd0;
             m_axi_arvalid <= 1'b0;
             m_axi_araddr  <= '0;
             wr_aw_sent    <= 1'b0;
@@ -123,15 +123,22 @@ module argon2_axi_mm #(
             m_axi_awvalid <= 1'b0;
             m_axi_awaddr  <= '0;
         end else begin
-            if (mem_rd_valid && mem_rd_ready) begin
+            logic rd_inc, rd_dec;
+            rd_inc = (mem_rd_valid && mem_rd_ready);
+            rd_dec = (m_axi_rvalid && m_axi_rready && m_axi_rlast);
+            case ({rd_inc, rd_dec})
+                2'b10: rd_count <= rd_count + 2'd1;
+                2'b01: rd_count <= rd_count - 2'd1;
+                2'b11: rd_count <= rd_count;
+                default: ;
+            endcase
+
+            if (rd_inc) begin
                 m_axi_arvalid <= 1'b1;
                 m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
-                rd_pend       <= 1'b1;
             end
             if (m_axi_arvalid && m_axi_arready)
                 m_axi_arvalid <= 1'b0;
-            if (m_axi_rvalid && m_axi_rready && m_axi_rlast)
-                rd_pend <= 1'b0;
 
             if (mem_wr_valid && !wr_aw_sent && !wr_b_wait && !m_axi_awvalid) begin
                 m_axi_awvalid <= 1'b1;

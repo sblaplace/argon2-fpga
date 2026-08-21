@@ -49,6 +49,7 @@ module argon2_fill_ctrl #(
     logic [511:0] prev_q [0:15];
     logic [511:0] ref_q  [0:15];
     logic [511:0] dest_q [0:15];
+    logic [511:0] dest_work_q [0:15];
     logic [511:0] pref_q [0:15];
     logic [511:0] cache_q [0:15];
     logic [ADDR_W-1:0] cache_addr;
@@ -141,17 +142,18 @@ module argon2_fill_ctrl #(
                        : 1'b0;
     assign c_in_x     = (state == WRITE && nxt_sending) ? c_out_data : prev_q[beat[3:0]];
     assign c_in_y     = (state == WRITE && nxt_sending) ? ref_q[nxt_beat[3:0]] : ref_q[beat[3:0]];
-    assign c_in_dest  = (state == WRITE && nxt_sending) ? (with_xor ? dest_q[nxt_beat[3:0]] : 512'd0)
-                       : dstream ? mem_rd_data : (with_xor ? dest_q[beat[3:0]] : 512'd0);
+    assign c_in_dest  = (state == WRITE && nxt_sending) ? (with_xor ? dest_work_q[nxt_beat[3:0]] : 512'd0)
+                       : dstream ? mem_rd_data : (with_xor ? dest_work_q[beat[3:0]] : 512'd0);
     assign c_in_last  = (state == WRITE && nxt_sending) ? (nxt_beat == 5'd15) : (beat == 5'd15);
     assign c_out_ready = (state == WRITE) && (wb_count < WB_DEPTH);
 
     // Overlap eligibility: independent addressing (argon2i / argon2id first
     // half), the next ref already prefetched, prev available from the write
-    // cache, no dest XOR (pass 0), and not at a segment or address-window
-    // boundary. Must be true before the drain starts so the send is aligned
-    // with drain beat 0.
-    assign nxt_ok = independent && pref_ready && cache_valid && !with_xor
+    // cache, and not at a segment or address-window boundary. For pass > 0
+    // (with_xor), the dest block must also have been prefetched.
+    // Must be true before the drain starts so the send is aligned with drain beat 0.
+    assign nxt_ok = independent && pref_ready && cache_valid
+                  && (!with_xor || dest_done)
                   && (index_r + 32'd1 < segment_length)
                   && (index_n[6:0] != 7'd0);
 
@@ -337,7 +339,14 @@ module argon2_fill_ctrl #(
 
             if (pref_issued && !pref_accepted && mem_rd_valid && mem_rd_ready) begin
                 pref_accepted <= 1'b1;
-                mem_rd_valid <= 1'b0;
+                if (with_xor && !dest_last_blk && !dest_issued) begin
+                    mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
+                    mem_rd_valid <= 1'b1;
+                    dest_issued  <= 1'b1;
+                    dest_beat    <= 5'd0;
+                end else begin
+                    mem_rd_valid <= 1'b0;
+                end
             end
             // DISPATCH is included because the nxt_skip fast path can reach
             // it while a chained prefetch's last beat is still returning;
@@ -350,12 +359,6 @@ module argon2_fill_ctrl #(
                         pref_ready <= 1'b1;
                         pref_accepted <= 1'b0;
                         pref_beat <= 5'd0;
-                        if (with_xor && !dest_last_blk && !dest_issued && !mem_rd_valid) begin
-                            mem_rd_addr <= dest_next_addr[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
-                            dest_issued <= 1'b1;
-                            dest_beat <= 5'd0;
-                        end
                     end else pref_beat <= pref_beat + 5'd1;
                 end
             end
@@ -465,6 +468,7 @@ module argon2_fill_ctrl #(
                             if (with_xor) begin
                                 if (dest_done) begin
                                     dstream <= 1'b0;
+                                    for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else if (dest_issued) begin
@@ -530,6 +534,7 @@ module argon2_fill_ctrl #(
                 DEST_WAIT: begin
                     if (dest_done) begin
                         dstream <= 1'b0;
+                        for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                         dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                         state <= COMPRESS;
                     end
@@ -552,6 +557,7 @@ module argon2_fill_ctrl #(
                             end else if (with_xor) begin
                                 if (dest_done) begin
                                     dstream <= 1'b0;
+                                    for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else begin
@@ -588,6 +594,7 @@ module argon2_fill_ctrl #(
                             end else if (with_xor) begin
                                 if (dest_done) begin
                                     dstream <= 1'b0;
+                                    for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else if (dest_issued) begin
@@ -617,6 +624,7 @@ module argon2_fill_ctrl #(
                         dest_q[beat] <= mem_rd_data;
                         if (mem_rd_last || beat == 5'd15) begin
                             beat <= 5'd0;
+                            for (int i=0; i<16; i=i+1) dest_work_q[i] <= dest_q[i];
                             state <= COMPRESS;
                             dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                         end else beat <= beat + 5'd1;
@@ -665,6 +673,7 @@ module argon2_fill_ctrl #(
                         nxt_latched <= 1'b1;
                         nxt_beat    <= 5'd0;
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
+                        if (with_xor) for (int i=0;i<16;i = i + 1) dest_work_q[i] <= dest_q[i];
                         // The prefetched ref for this block is consumed by
                         // the copy: clear the handshake flags so ADVANCE
                         // does not stall. Immediately issue the K+2 prefetch
@@ -675,6 +684,10 @@ module argon2_fill_ctrl #(
                         pref_issued   <= 1'b0;
                         pref_accepted <= 1'b0;
                         pref_beat     <= 5'd0;
+                        dest_done     <= 1'b0;
+                        dest_issued   <= 1'b0;
+                        dest_accepted <= 1'b0;
+                        dest_beat     <= 5'd0;
                         if (can_prefetch_n2 && !mem_rd_valid) begin
                             mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
                             mem_rd_valid <= 1'b1;
