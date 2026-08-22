@@ -163,6 +163,12 @@ dcp() {
   echo "Building DCP from $example using top $TOP_MODULE (N_P=$NP)..."
   echo "  The generated wrapper includes sources from this checkout via relative paths."
   echo "  Keep $ROOT in place until the HDK compile finishes."
+  echo ""
+  echo "  Timing: source fpga/f1/build/synth_timing.tcl into the HDK synth tcl"
+  echo "  (or set the RETIMING properties on synth_1) for the 250 MHz BlaMka"
+  echo "  DSP-register packing. Core/OCL/DDR are all on clk_main_a0 — no CDC."
+  echo "  See docs/TIMING_250MHZ.md for the measured 250 MHz projection."
+  echo ""
   (cd "$example" && aws_build_dcp_from_cl -foreground)
 }
 

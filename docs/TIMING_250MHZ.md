@@ -113,6 +113,11 @@ chain. This is a synth hint / small `fbla` rewrite, not a latency change.
 
 1. Synthesize at 250 MHz with `-retiming`; confirm the `argon2_index`
    subtract (not a divider) and the BlaMka DSP register packing landed.
+   For the F1 HDK flow, `fpga/f1/build/synth_timing.tcl` sets the
+   `STEPS.SYNTH_DESIGN.ARGS.RETIMING` property on `synth_1` — source it
+   into the HDK synthesis tcl before `launch_runs`. The core/OCL/DDR are
+   all on `clk_main_a0` (shell-owned), so there are no CDC constraints to
+   add.
 2. Read the top negative-slack paths. Expectation: BlaMka mult-add, then
    `wb_hit_ref` reduction, then addr/`argon2_addr_gen`.
 3. If BlaMka misses, fold `x+y` into the DSP48 C-adder (Step 2 above).
