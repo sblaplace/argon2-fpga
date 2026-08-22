@@ -37,6 +37,23 @@ sketched:
   the dest being streamed. That is the dest/pref double buffer the
   original step 2 sketched, and the only part of mechanism 5 still open.
 
+  **Why this is a low-priority next step, not a quick win (measured
+  2026-08-22):** the dest double-buffer is *argon2i-only* — argon2id
+  (RFC 9106's recommended type, the one defenders actually use) is
+  *already* the fastest of the three at 1.044 cand/s and is untouched by
+  it (its pass>0 is data-dependent, not independent). And the read port
+  is already ~94% occupied in steady state: the perf bench's "port busy
+  ~52%" counts only DDR command latency (P_RD/P_WR/P_REF), not the ~70%
+  of cycles spent streaming R/W beats (those flow during P_IDLE with
+  `arready` deasserted). So even with the dest prefetched perfectly,
+  argon2i DDR4 can at most match argon2id (~1.04, +4%) before the single
+  port saturates — the IDEAL +11% is unreachable on DDR4. Combined with
+  the rewrite touching the dependent dest paths (PR #12 burned 27
+  commits on this and never went green), the risk/reward is poor. The
+  higher-value levers are the 250 MHz CL clock (helps *all* types,
+  +~25%, bounded by the 250 MHz AXI ceiling ~1.33) and the
+  partitioned-memory p=4 crossbar.
+
 Landing the sweep also exposed and fixed two latent correctness bugs (the
 `u_area_dep` `same_lane` input was never connected; the write-FIFO RAW
 guard was masked by a cache hit that nothing forwarded from) — see
