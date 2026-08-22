@@ -94,14 +94,30 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       200 MHz AXI bus ceiling (1.07), with the DDR port 55% busy. The
       double-buffer lets the compressor load block N+1 while draining
       block N; pass-0 blocks skip COMPRESS entirely and chain (IDEAL
-      floor 56.3 cyc/blk → 1.13 cand/s). Type sweep: argon2d ~0.60/lane,
-      argon2id ~0.65/lane (ref-latency bound, no prefetch). Numbers,
-      sweep tables, and remaining headroom:
-      [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). The same work flushed
-      out four latent CL bugs (broken file list, missing `rready` in the
-      local `axi_bus_t`, a byte-addressing bug in the OCL slave,
-      unlatched `done`) — the 4-channel `tb_cl_argon2` bench now passes
-      on Verilator as well as Icarus.
+      floor 56.3 cyc/blk → 1.13 cand/s). Numbers, sweep tables, and
+      remaining headroom: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+      The same work flushed out four latent CL bugs (broken file list,
+      missing `rready` in the local `axi_bus_t`, a byte-addressing bug in
+      the OCL slave, unlatched `done`) — the 4-channel `tb_cl_argon2`
+      bench now passes on Verilator as well as Icarus.
+- [x] **Dependent fast path (argon2d / argon2id, all passes)**: the pass>0
+      dest-xor read goes out early from a deterministic address (the next
+      block's own position — no data dependence), the dependent ref read is
+      issued at drain beat 0 in *every* pass (was pass-0 only), and the
+      returning ref burst **streams straight into the compressor load**
+      (watermarked replay from registers + live beats). Measured
+      (N_P=8, DDR4 model, t=3): argon2d 97.2 → 63.1 cyc/blk
+      (**0.654 → 1.007 cand/s/lane**), argon2id 93.1 → 60.9
+      (**0.683 → 1.044**); F1×4 2.62 → 4.03 and 2.73 → 4.18 — all three
+      types now within ~6% of the 200 MHz AXI ceiling. Extending the KATs
+      to a geometry sweep (m' 16–128 × t 1–3 × i/d/id,
+      `sim/tb_argon2_axi_sweep.sv`) also exposed and fixed **two latent
+      correctness bugs** on main: the dependent early-ref reference area
+      was computed with `same_lane` unconnected (wrong for every p=1
+      geometry with segment_length > 2), and a reference to a recently
+      written block could read memory before its write committed (the
+      write-FIFO RAW guard was masked by a cache hit that nothing ever
+      forwarded from; now forwarded from the write-through cache).
 - [ ] AWS F1 hello-world: build the shell, run the 32 KiB RFC vector on a
       single DDR4 port (sim KAT already exists), then `cl_dram_dma`
       multi-channel bandwidth. Bring-up checklist, host driver, and
@@ -133,6 +149,7 @@ tests/                unittest against RFC 9106 §5
 make test                              # RFC 7693 + RFC 9106 §5, no simulator needed
 make -C sim                            # Icarus self-checks (needs iverilog)
 make -C sim SIM=verilator              # same benches on Verilator
+make -C sim SIM=verilator NP=8 sweep   # m'16-128 x t1-3 x i/d/id AXI KAT sweep
 make sim-np8                           # full sim suite at the N_P=8 performance point
 make -C sim SIM=verilator NP=8 perf    # cand/s vs. DDR4 timing model
 ./fpga/f1/build.sh sim --np 8          # 4-channel CL bench at the same N_P=8 point

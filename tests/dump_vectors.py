@@ -72,6 +72,25 @@ def dump_fill(type_: Type, stem: str) -> None:
     print(f"{stem} tag {tag.hex()}")
 
 
+def dump_sweep(m: int, t: int, type_: Type, stem: str) -> None:
+    """p=1 KAT at an arbitrary geometry: m' >= 16 / t >= 1 exposes the
+    early-dep reference-area and write-FIFO RAW paths that m'=8 KATs cannot
+    (segment_length 2 makes both mappings coincide and short reference
+    distances always clear the FIFO)."""
+    kw = dict(
+        time_cost=t,
+        memory_cost=m,
+        parallelism=1,
+        hash_len=32,
+        type_=type_,
+    )
+    init = argon2_init_memory(b"password", b"somesalt", **kw)
+    tag, final = argon2_fill(b"password", b"somesalt", **kw)
+    write_mem_hex(GEN / f"{stem}_init.hex", init)
+    write_mem_hex(GEN / f"{stem}_exp.hex", final)
+    print(f"{stem} tag {tag.hex()}")
+
+
 def main() -> None:
     v = [IV[0], IV[1], IV[2], IV[3]] + [0] * 12
     blake2b_g(v, 0, 1, 2, 3, 1, 2)
@@ -99,6 +118,14 @@ def main() -> None:
     dump_fill(Type.I, "fill_i")
     dump_fill(Type.D, "fill_d")
     dump_fill(Type.ID, "fill_id")
+    dump_sweep(128, 3, Type.I, "bigfill_i")   # tb_argon2_axi_big
+    dump_sweep(128, 3, Type.D, "bigfill_d")
+    dump_sweep(128, 3, Type.ID, "bigfill_id")
+    for m in (16, 32, 64, 128):               # tb_argon2_axi_sweep
+        for tn, tt in (("i", Type.I), ("d", Type.D), ("id", Type.ID)):
+            for t in (1, 2, 3):
+                if t == 3 or m in (16,) or (m, tn) in ((128, "id"),):
+                    dump_sweep(m, t, tt, f"sweep_{tn}_m{m}t{t}")
     dump_rfc(Type.I, "rfc_i")
     dump_rfc(Type.D, "rfc_d")
     dump_rfc(Type.ID, "rfc_id")

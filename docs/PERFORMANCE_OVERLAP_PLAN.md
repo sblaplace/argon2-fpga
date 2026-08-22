@@ -2,11 +2,38 @@
 
 ## Status
 
-**Guarded, not yet optimized.** PR #12's four mechanisms are documented here
-for a careful incremental re-attempt. Step 1 of the plan (a state-discipline
-gate that locks the pass-0-overlap / pass>0-serial structure) is **implemented**
-in this PR as `sim/tb_argon2_fill_discipline.sv` and wired into the CI bench
-list. Nothing in the RTL is changed; green `main` stays bit-identical.
+**Partially landed (2026-08-22).** The dependent path is now optimized end
+to end and the plan's key mechanisms are in, in a different form than
+sketched:
+
+* Step 2 (dest double-buffer) — **not needed as designed**: the early dest
+  read goes out from a COMPRESS-state hook (deterministic address, port
+  idle in dependent mode) and a single buffer suffices because the data is
+  consumed one block later than it is collected.
+* Step 3 (early dest prefetch) — **landed** for dependent pass>0 blocks.
+* Step 4 (multi-outstanding reads) — **correctly skipped** (see the
+  "Rejected" note in `docs/PERFORMANCE.md`; a second ARID cannot overlap
+  R beats on one channel).
+* Mechanism 1 for *dependent* blocks — **landed differently**: instead of
+  chaining the background send (which needs the ref address before the
+  drain, impossible for data-dependent blocks), the returning dep read
+  **streams into the compressor load** (DSM_REF + `dep_cnt` watermark).
+  argon2d 97.2 → 63.1 cyc/blk (0.654 → 1.007 cand/s), argon2id
+  93.1 → 60.9 (0.683 → 1.044). The dep read now also runs in every pass,
+  gated by raw write-FIFO / self hazards.
+* **Mechanism 1 for independent pass>0 blocks (the original step 5)
+  remains open** — that is the chained overlapped send with a
+  watermark-gated or double-buffered dest, worth the remaining ~4–6% for
+  argon2i.
+
+Landing the sweep also exposed and fixed two latent correctness bugs (the
+`u_area_dep` `same_lane` input was never connected; the write-FIFO RAW
+guard was masked by a cache hit that nothing forwarded from) — see
+`docs/PERFORMANCE.md`. The discipline gate from step 1 still passes:
+pass>0 blocks keep using the COMPRESS state (the stream runs *inside* the
+load, it does not chain), so `p0 COMPRESS < p1 COMPRESS` still holds.
+
+The original plan text follows for the record.
 
 ## Objective
 

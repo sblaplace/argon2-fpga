@@ -45,6 +45,14 @@ SRC_tb_argon2_axi       := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_fill_axi.sv \
 	tb_axi_ram.sv
 
+# Large-m' (128 KiB, t=3) AXI KAT — exercises scale-only scheduling paths
+# (write-FIFO hazard skips, cross-segment early dest, multi-window addr).
+SRC_tb_argon2_axi_big   := $(SRC_tb_argon2_axi)
+
+# Geometry sweep (m' 16/32/64/128 x t 1/2/3 x i/d/id): locks the dependent
+# early-ref reference area and write-FIFO RAW distances that m'=8 cannot see.
+SRC_tb_argon2_axi_sweep := $(SRC_tb_argon2_axi)
+
 # ---- F1 CL top-level bench ------------------------------------------------
 F1DES := ../fpga/f1/design
 
@@ -102,7 +110,7 @@ endif
 .PHONY: all blake2b blamka index compress addr fill discipline rfc axi cl perf vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
-all: blake2b blamka index compress addr fill discipline rfc axi
+all: blake2b blamka index compress addr fill discipline rfc axi axibig sweep
 
 vectors: $(GEN)/fill_i_init.hex
 
@@ -119,6 +127,8 @@ fill:    vectors run-tb_argon2_fill
 discipline: vectors run-tb_argon2_fill_discipline
 rfc:     vectors run-tb_argon2_fill_rfc
 axi:     vectors run-tb_argon2_axi
+axibig:  vectors run-tb_argon2_axi_big
+sweep:   vectors run-tb_argon2_axi_sweep
 
 ifeq ($(SIM),verilator)
 

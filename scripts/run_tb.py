@@ -34,8 +34,9 @@ SIM_DIR = os.path.join(ROOT, "sim")
 PASS_MARKER = "PASS"
 
 SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
-               "fill", "discipline", "rfc", "axi", "cl"]
-PER_TARGET_TIMEOUT = 120  # seconds; any bench here finishes in <30 s
+               "fill", "discipline", "rfc", "axi", "axibig", "sweep", "cl"]
+PER_TARGET_TIMEOUT = 300  # seconds; the geometry sweep is the long pole
+# (~30 s on Verilator NP=1; Icarus/vvp is several times slower)
 # N_P matrix: run the whole suite at every value in N_P_MATRIX (the Makefile
 # passes NP through to each bench via -PN_P). The KAT vectors are N_P-
 # independent, but the parallel-G path (N_P>1) is a distinct RTL topology that
