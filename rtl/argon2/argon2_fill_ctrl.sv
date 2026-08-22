@@ -53,7 +53,15 @@ module argon2_fill_ctrl #(
     logic [511:0] cache_q [0:15];
     logic [ADDR_W-1:0] cache_addr;
     logic         cache_valid;
-    logic         dstream;
+    // dstream: what the COMPRESS-state load streams live from the read port
+    // instead of collecting first (the read port is the serial resource).
+    //   DSM_NONE : all inputs from registers
+    //   DSM_DEST : dest-xor beats stream into the load (original behavior)
+    //   DSM_REF  : dependent-ref beats stream into the load (buffered beats
+    //              come from dep_q via the dep_cnt watermark, later beats
+    //              straight off the port)
+    localparam logic [1:0] DSM_NONE = 2'd0, DSM_DEST = 2'd1, DSM_REF = 2'd2;
+    logic [1:0]     dstream;
     logic [4:0]   beat;
     logic [4:0]   pref_beat;
     logic         pref_issued, pref_ready, pref_accepted;
@@ -61,9 +69,14 @@ module argon2_fill_ctrl #(
     logic [4:0]   dest_beat;
 
     // Dependent early next-ref, issued on the SAME read port while K drains
-    // (no second AXI stream; see docs/PERF "Rejected"). Pass 0 only.
+    // (no second AXI stream; see docs/PERF "Rejected"). Any pass: once the
+    // next block's dest-xor read is issued early (deterministic address, see
+    // the COMPRESS-state hook), the port order at drain beat 0 is free for
+    // the dep read in pass>0 too — the two requests serialize on the single
+    // outstanding read, which is exactly the intended schedule.
     logic [511:0] dep_q [0:15];
     logic [4:0]   dep_beat;
+    logic [4:0]   dep_cnt;           // beats collected so far (watermark, 0..16)
     logic         dep_issued, dep_accepted, dep_ready;
     logic         dep_seen;
     logic [63:0]  dep_j1;
@@ -94,11 +107,12 @@ module argon2_fill_ctrl #(
 
     logic wb_hit_ref, wb_hit_ref_n;
     logic cache_hit_ref, cache_hit_ref_n;
-    logic wb_hit_ref_eff, wb_hit_ref_n_eff;
+    logic dep_wb_hit;   // early-dep target still uncommitted in the write FIFO
 
     always_comb begin
         wb_hit_ref = 1'b0;
         wb_hit_ref_n = 1'b0;
+        dep_wb_hit = 1'b0;
         for (int ii=0; ii<WB_DEPTH; ii = ii + 1) begin
             logic in_fifo;
             in_fifo = 1'b0;
@@ -109,13 +123,15 @@ module argon2_fill_ctrl #(
             if (in_fifo) begin
                 if (wb_addr[ii] == ref_idx[ADDR_W-1:0]) wb_hit_ref = 1'b1;
                 if (wb_addr[ii] == ref_idx_n[ADDR_W-1:0]) wb_hit_ref_n = 1'b1;
+                if (wb_addr[ii] == dep_ridx[ADDR_W-1:0]) dep_wb_hit = 1'b1;
             end
         end
     end
+    // NOTE: wb hits are NOT masked by cache hits anywhere — a cache hit is
+    // serviced by forwarding (DISPATCH / DREF_SETTLE), never by reading
+    // memory that might still be mid-commit.
     assign cache_hit_ref   = cache_valid && (cache_addr == ref_idx[ADDR_W-1:0]);
     assign cache_hit_ref_n = cache_valid && (cache_addr == ref_idx_n[ADDR_W-1:0]);
-    assign wb_hit_ref_eff   = wb_hit_ref   && !cache_hit_ref;
-    assign wb_hit_ref_n_eff = wb_hit_ref_n && !cache_hit_ref_n;
 
     assign mem_wr_valid = (wb_count != 0);
     assign mem_wr_data  = wb_data[wb_rptr];
@@ -136,13 +152,23 @@ module argon2_fill_ctrl #(
     // the current output beat (block N's output = block N+1's prev), ref
     // comes from the prefetched ref_q copy.
     assign nxt_sending = nxt_latched && !nxt_sent;
-    assign c_in_valid = (state == COMPRESS) ? (dstream ? mem_rd_data_v : 1'b1)
+    // DSM_REF: the dependent-ref read is still returning while the load runs.
+    // Beats already collected (beat < dep_cnt) replay from dep_q; the beat
+    // currently on the port (which the collector is writing to dep_q in the
+    // same cycle, at index dep_cnt) flows straight into the load.
+    assign c_in_valid = (state == COMPRESS)
+                       ? ((dstream == DSM_DEST) ? mem_rd_data_v
+                          : (dstream == DSM_REF) ? ((beat < dep_cnt) || mem_rd_data_v)
+                          : 1'b1)
                        : (state == WRITE)   ? (nxt_sending && c_out_valid && c_out_ready)
                        : 1'b0;
     assign c_in_x     = (state == WRITE && nxt_sending) ? c_out_data : prev_q[beat[3:0]];
-    assign c_in_y     = (state == WRITE && nxt_sending) ? ref_q[nxt_beat[3:0]] : ref_q[beat[3:0]];
+    assign c_in_y     = (state == WRITE && nxt_sending) ? ref_q[nxt_beat[3:0]]
+                       : (dstream == DSM_REF) ? ((beat < dep_cnt) ? dep_q[beat[3:0]] : mem_rd_data)
+                       : ref_q[beat[3:0]];
     assign c_in_dest  = (state == WRITE && nxt_sending) ? (with_xor ? dest_q[nxt_beat[3:0]] : 512'd0)
-                       : dstream ? mem_rd_data : (with_xor ? dest_q[beat[3:0]] : 512'd0);
+                       : (dstream == DSM_DEST) ? mem_rd_data
+                       : (with_xor ? dest_q[beat[3:0]] : 512'd0);
     assign c_in_last  = (state == WRITE && nxt_sending) ? (nxt_beat == 5'd15) : (beat == 5'd15);
     assign c_out_ready = (state == WRITE) && (wb_count < WB_DEPTH);
 
@@ -204,10 +230,16 @@ module argon2_fill_ctrl #(
         .lane_length(lane_length), .ref_index(z_n)
     );
 
+    // Same-lane rule for the dependent early read: in pass 0 / slice 0 the
+    // reference lane is forced to the own lane (RFC 9106 §3.3); afterwards it
+    // is J2 % lanes, exactly like the serial path (ref_lane).
+    logic dep_same_lane;
+    assign dep_same_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
+                         ? 1'b1 : ((dep_j1[63:32] % lanes) == lane_id);
     argon2_ref_area u_area_dep (
         .pass(pass_r), .slice(slice_r), .index(index_n),
         .lane_length(lane_length), .segment_length(segment_length),
-        .same_lane(), .ref_area(dep_area), .start_position(dep_spos)
+        .same_lane(dep_same_lane), .ref_area(dep_area), .start_position(dep_spos)
     );
     argon2_index u_idx_dep (
         .j1(dep_j1[31:0]), .ref_area(dep_area), .start_position(dep_spos),
@@ -219,13 +251,18 @@ module argon2_fill_ctrl #(
         else
             dep_ridx = (dep_j1[63:32] % lanes) * lane_length + dep_z;
     end
-    assign dep_self = (dep_ridx == curr_idx + 32'd1);
-    assign dep_can  = !independent && (pass_r == 32'd0) && (state == WRITE)
+    // dep_self: target is the block being written right now (K — its beats
+    // are entering the write FIFO this drain and the RAM copy is stale until
+    // commit) or the not-yet-computed K+1. dep_wb_hit: target still sits
+    // uncommitted in the write FIFO (RAM read would return stale data); the
+    // normal serial path handles both cases (DREF_SETTLE waits for the FIFO
+    // to drain, then reads committed memory).
+    assign dep_self = (dep_ridx == curr_idx) || (dep_ridx == curr_idx + 32'd1);
+    assign dep_can  = !independent && (state == WRITE)
                    && dep_seen && (index_n < segment_length)
                    && !dep_issued && !dep_ready && !dep_accepted
-                   && !dest_issued && !dest_accepted
                    && !pref_issued && !pref_accepted
-                   && !mem_rd_valid && !dep_self;
+                   && !mem_rd_valid && !dep_self && !dep_wb_hit;
 
     logic a_init, a_start, a_busy, a_done;
     argon2_addr_gen #(.N_P(N_P)) u_addr (
@@ -258,12 +295,26 @@ module argon2_fill_ctrl #(
     assign ref_lane_n     = ((pass_r == 32'd0) && (slice_r == 32'd0)) ? lane_id : addr_word_n[63:32] % lanes;
     assign same_lane_n    = (ref_lane_n == lane_id);
     assign ref_idx_n      = ref_lane_n * lane_length + z_n;
-    assign can_prefetch   = independent && (index_n < segment_length) && (index_n[6:0] != 7'd0) && !wb_hit_ref_n_eff;
+    // Prefetch safety: the prefetched target's final data must already be
+    // committed in memory. That rules out (a) blocks whose write is still in
+    // the write FIFO (raw wb hit — NOT masked by a cache hit: nothing ever
+    // forwards ref data from the cache, so a masked hit would read stale
+    // RAM), (b) the last-written block (cache hit — service it from the
+    // cache at DISPATCH instead), and (c) blocks that are not even written
+    // yet: the one being compressed (curr_idx) and, for the chained K+2
+    // prefetch issued during the drain latch, also the block being streamed
+    // into the compressor (index_n = K+1).
+    assign can_prefetch   = independent && (index_n < segment_length)
+                          && (index_n[6:0] != 7'd0)
+                          && !wb_hit_ref_n && !cache_hit_ref_n
+                          && (ref_idx_n != curr_idx);
     // Same rule for block K+2 (used to chain the overlapped prefetches).
     // With nxt_issue2 the second address port already points at K+2, so
-    // wb_hit_ref_n_eff / ref_idx_n reflect K+2 during the latch pulse.
+    // wb_hit_ref_n / ref_idx_n reflect K+2 during the latch pulse.
     assign can_prefetch_n2 = independent && (index_n2 < segment_length)
-                           && (index_n2[6:0] != 7'd0) && !wb_hit_ref_n_eff;
+                           && (index_n2[6:0] != 7'd0)
+                           && !wb_hit_ref_n && !cache_hit_ref_n
+                           && (ref_idx_n != curr_idx) && (ref_idx_n != index_n);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -290,10 +341,11 @@ module argon2_fill_ctrl #(
             nxt_skip    <= 1'b0;
             cache_valid <= 1'b0;
             cache_addr <= '0;
-            dstream <= 1'b0;
+            dstream <= DSM_NONE;
             sync_req <= 1'b0;
             mem_rd_addr <= '0;
             dep_beat <= 5'd0;
+            dep_cnt  <= 5'd0;
             dep_issued <= 1'b0; dep_accepted <= 1'b0; dep_ready <= 1'b0;
             dep_seen <= 1'b0; dep_j1 <= 64'd0; dep_idx <= 32'd0;
             wb_wptr <= 6'd0;
@@ -382,6 +434,7 @@ module argon2_fill_ctrl #(
             if (dep_issued && dep_accepted && !dep_ready) begin
                 if (mem_rd_data_v) begin
                     dep_q[dep_beat] <= mem_rd_data;
+                    dep_cnt <= dep_cnt + 5'd1;
                     if (mem_rd_last || dep_beat == 5'd15) begin
                         dep_ready    <= 1'b1;
                         dep_accepted <= 1'b0;
@@ -439,6 +492,7 @@ module argon2_fill_ctrl #(
                         dep_issued <= 1'b0;
                         dep_seen   <= 1'b0;
                         dep_idx    <= 32'd0;
+                        dep_cnt    <= 5'd0;
                     end
                     if (nxt_skip) begin
                         // The next block was already streamed into the
@@ -464,20 +518,20 @@ module argon2_fill_ctrl #(
                             for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
                             if (with_xor) begin
                                 if (dest_done) begin
-                                    dstream <= 1'b0;
+                                    dstream <= DSM_NONE;
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else if (dest_issued) begin
-                                    dstream <= 1'b0;
+                                    dstream <= DSM_NONE;
                                     state <= DEST_WAIT;
                                 end else begin
-                                    dstream <= 1'b1;
+                                    dstream <= DSM_DEST;
                                     mem_rd_addr <= curr_idx[ADDR_W-1:0];
                                     mem_rd_valid <= 1'b1;
                                     state <= ISSUE_DEST;
                                 end
                             end else begin
-                                dstream <= 1'b0;
+                                dstream <= DSM_NONE;
                                 state <= COMPRESS;
                                 dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                             end
@@ -487,15 +541,47 @@ module argon2_fill_ctrl #(
                             state <= ISSUE_PREV;
                         end
                     end else if (independent) begin
-                        if (wb_hit_ref_eff) state <= DISPATCH;
+                        if (cache_hit_ref) begin
+                            // Ref is the last-written block: forward from the
+                            // write-through cache (its write may still be in
+                            // the FIFO / mid-commit at the slave — reading
+                            // memory now could return stale data).
+                            for (int i=0;i<16;i = i + 1) ref_q[i] <= cache_q[i];
+                            if (cache_valid) begin
+                                for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
+                                if (with_xor) begin
+                                    if (dest_done) begin
+                                        dstream <= DSM_NONE;
+                                        state <= COMPRESS;
+                                        dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
+                                    end else if (dest_issued) begin
+                                        dstream <= DSM_NONE;
+                                        state <= DEST_WAIT;
+                                    end else begin
+                                        dstream <= DSM_DEST;
+                                        mem_rd_addr <= curr_idx[ADDR_W-1:0];
+                                        mem_rd_valid <= 1'b1;
+                                        state <= ISSUE_DEST;
+                                    end
+                                end else begin
+                                    dstream <= DSM_NONE;
+                                    state <= COMPRESS;
+                                    dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
+                                end
+                            end else begin
+                                mem_rd_addr <= prev_idx[ADDR_W-1:0];
+                                mem_rd_valid <= 1'b1;
+                                state <= ISSUE_PREV;
+                            end
+                        end else if (wb_hit_ref) state <= DISPATCH;  // wait FIFO drain (raw)
                         else begin
-                            dstream <= 1'b0;
+                            dstream <= DSM_NONE;
                             mem_rd_addr <= ref_idx[ADDR_W-1:0];
                             mem_rd_valid <= 1'b1;
                             state <= ISSUE_REF;
                         end
                     end else if (!independent && dep_ready && (dep_idx == index_r)
-                                 && cache_valid && (pass_r == 32'd0)) begin
+                                 && cache_valid && (dest_done || !with_xor)) begin
                         for (int i=0;i<16;i = i + 1) begin
                             ref_q[i]  <= dep_q[i];
                             prev_q[i] <= cache_q[i];
@@ -505,13 +591,39 @@ module argon2_fill_ctrl #(
                         dep_seen   <= 1'b0;
                         dep_idx    <= 32'd0;
                         dstream    <= 1'b0;
+                        // The early dest read for THIS block is consumed by
+                        // the load below; clear the flags so the COMPRESS-state
+                        // hook can issue the next block's dest read (dest_q
+                        // itself keeps the data until a new read collects).
+                        dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                         state      <= COMPRESS;
+                    end else if (!independent && dep_issued && !dep_ready
+                                 && (dep_idx == index_r) && cache_valid
+                                 && (dest_done || !with_xor)) begin
+                        // Fast dependent path: the early dep read is still
+                        // in flight; stream its beats straight into the
+                        // compressor load (DSM_REF) instead of waiting for
+                        // the full burst and then reloading from dep_q.
+                        // prev is forwarded from the write-through cache,
+                        // dest (if any) was prefetched early. dep flags stay
+                        // set — the collector keeps filling dep_q / dep_cnt
+                        // and the COMPRESS load-end re-arm clears them.
+                        for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
+                        // dest_q data survives the flag clear (registers);
+                        // releasing the flags lets the COMPRESS-state hook
+                        // issue the following block's dest read right away —
+                        // the request queues behind the in-flight dep beats
+                        // on the single outstanding read, which is the
+                        // intended port schedule.
+                        dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
+                        dstream <= DSM_REF;
+                        state   <= COMPRESS;
                     end else if (cache_valid) begin
                         for (int i=0;i<16;i = i + 1) prev_q[i] <= cache_q[i];
-                        dstream <= 1'b0;
+                        dstream <= DSM_NONE;
                         state <= DREF_SETTLE;
                     end else begin
-                        dstream <= 1'b0;
+                        dstream <= DSM_NONE;
                         mem_rd_addr <= prev_idx[ADDR_W-1:0];
                         mem_rd_valid <= 1'b1;
                         state <= ISSUE_PREV;
@@ -520,7 +632,25 @@ module argon2_fill_ctrl #(
                 DREF_SETTLE: begin
                     dep_ready <= 1'b0; dep_issued <= 1'b0; dep_seen <= 1'b0;
                     dep_idx <= 32'd0;
-                    if (wb_hit_ref_eff) state <= DREF_SETTLE;
+                    dep_cnt <= 5'd0;
+                    if (cache_hit_ref) begin
+                        // Ref is the last-written block: forward from the
+                        // write-through cache instead of racing its commit.
+                        for (int i=0;i<16;i = i + 1) ref_q[i] <= cache_q[i];
+                        dstream <= DSM_NONE;
+                        if (with_xor && !dest_done) begin
+                            if (dest_issued) state <= DEST_WAIT;
+                            else begin
+                                dstream <= DSM_DEST;
+                                mem_rd_addr <= curr_idx[ADDR_W-1:0];
+                                mem_rd_valid <= 1'b1;
+                                state <= ISSUE_DEST;
+                            end
+                        end else begin
+                            state <= COMPRESS;
+                            dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
+                        end
+                    end else if (wb_hit_ref) state <= DREF_SETTLE;  // wait drain (raw)
                     else begin
                         mem_rd_addr <= ref_idx[ADDR_W-1:0];
                         mem_rd_valid <= 1'b1;
@@ -529,7 +659,7 @@ module argon2_fill_ctrl #(
                 end
                 DEST_WAIT: begin
                     if (dest_done) begin
-                        dstream <= 1'b0;
+                        dstream <= DSM_NONE;
                         dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                         state <= COMPRESS;
                     end
@@ -551,11 +681,16 @@ module argon2_fill_ctrl #(
                                 state <= ISSUE_PREV;
                             end else if (with_xor) begin
                                 if (dest_done) begin
-                                    dstream <= 1'b0;
+                                    dstream <= DSM_NONE;
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
+                                end else if (dest_issued) begin
+                                    // Early dest read in flight: wait for it
+                                    // instead of issuing a duplicate.
+                                    dstream <= DSM_NONE;
+                                    state <= DEST_WAIT;
                                 end else begin
-                                    dstream <= 1'b1;
+                                    dstream <= DSM_DEST;
                                     mem_rd_addr <= curr_idx[ADDR_W-1:0];
                                     mem_rd_valid <= 1'b1;
                                     state <= ISSUE_DEST;
@@ -579,7 +714,7 @@ module argon2_fill_ctrl #(
                         if (mem_rd_last || beat == 5'd15) begin
                             beat <= 5'd0;
                             if (!independent) begin
-                                if (wb_hit_ref_eff) state <= DREF_SETTLE;
+                                if (wb_hit_ref || cache_hit_ref) state <= DREF_SETTLE;
                                 else begin
                                     mem_rd_addr <= ref_idx[ADDR_W-1:0];
                                     mem_rd_valid <= 1'b1;
@@ -587,14 +722,14 @@ module argon2_fill_ctrl #(
                                 end
                             end else if (with_xor) begin
                                 if (dest_done) begin
-                                    dstream <= 1'b0;
+                                    dstream <= DSM_NONE;
                                     state <= COMPRESS;
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end else if (dest_issued) begin
-                                    dstream <= 1'b0;
+                                    dstream <= DSM_NONE;
                                     state <= DEST_WAIT;
                                 end else begin
-                                    dstream <= 1'b1;
+                                    dstream <= DSM_DEST;
                                     mem_rd_addr <= curr_idx[ADDR_W-1:0];
                                     mem_rd_valid <= 1'b1;
                                     state <= ISSUE_DEST;
@@ -609,7 +744,7 @@ module argon2_fill_ctrl #(
                 ISSUE_DEST: begin
                     if (mem_rd_ready) begin
                         mem_rd_valid <= 1'b0;
-                        state <= dstream ? COMPRESS : COLLECT_DEST;
+                        state <= (dstream != DSM_NONE) ? COMPRESS : COLLECT_DEST;
                     end
                 end
                 COLLECT_DEST: begin
@@ -629,6 +764,25 @@ module argon2_fill_ctrl #(
                         pref_issued <= 1'b1;
                         pref_beat <= 5'd0;
                     end
+                    // Dependent blocks: the dest-xor word for the NEXT block
+                    // lives at a fully deterministic address (the next block's
+                    // own position — no data dependence), and the read port is
+                    // idle here in dependent mode. Issue it now so it is
+                    // collected long before the next DISPATCH; the dependent
+                    // ref read then goes out on the same port at drain beat 0
+                    // (the single outstanding read serializes the two, which
+                    // is the intended schedule). Mid-segment only: at segment
+                    // boundaries the next block's dest is handled by the
+                    // normal path.
+                    if (!independent && with_xor && !dest_last_blk
+                        && (index_n < segment_length)
+                        && !dest_issued && !dest_accepted && !dest_done
+                        && !mem_rd_valid) begin
+                        mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
+                        mem_rd_valid <= 1'b1;
+                        dest_issued  <= 1'b1;
+                        dest_beat    <= 5'd0;
+                    end
                     if (c_in_valid && c_in_ready) begin
                         if (beat == 5'd15) begin
                             beat <= 5'd0;
@@ -641,6 +795,7 @@ module argon2_fill_ctrl #(
                             dep_issued <= 1'b0;
                             dep_ready  <= 1'b0;
                             dep_accepted <= 1'b0;
+                            dep_cnt    <= 5'd0;
                         end else beat <= beat + 5'd1;
                     end
                 end
@@ -655,6 +810,7 @@ module argon2_fill_ctrl #(
                         mem_rd_valid <= 1'b1;
                         dep_issued <= 1'b1;
                         dep_beat <= 5'd0;
+                        dep_cnt  <= 5'd0;
                     end
                     // Latch overlap eligibility while the drain is still
                     // pending and copy the prefetched ref into ref_q (the
@@ -707,8 +863,14 @@ module argon2_fill_ctrl #(
                 end
                 ADVANCE: begin
                     // Let an in-flight early dep for the next block finish
-                    // before issuing any other read (single R channel).
-                    if (dep_issued && !dep_ready && (dep_idx == index_n))
+                    // before issuing any other read (single R channel) —
+                    // UNLESS the DISPATCH fast path will consume it live:
+                    // when prev is in the write-through cache and the dest
+                    // (or no xor) is ready, the load itself streams the dep
+                    // beats (DSM_REF), so waiting for dep_ready here would
+                    // just serialize the read behind the load again.
+                    if (dep_issued && !dep_ready && (dep_idx == index_n)
+                        && !(cache_valid && (dest_done || !with_xor)))
                         state <= ADVANCE;
                     else if (nxt_skip) begin
                         // Overlapped block: no boundary can be pending (the
@@ -723,7 +885,7 @@ module argon2_fill_ctrl #(
                         else begin
                             pref_issued <= 1'b0; pref_ready <= 1'b0; pref_accepted <= 1'b0;
                             dep_issued <= 1'b0; dep_ready <= 1'b0; dep_accepted <= 1'b0;
-                            dep_seen <= 1'b0; dep_idx <= 32'd0;
+                            dep_seen <= 1'b0; dep_idx <= 32'd0; dep_cnt <= 5'd0;
                             if (lanes > 32'd1) begin
                                 sync_req <= 1'b1;
                                 state <= SLICE_SYNC;

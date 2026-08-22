@@ -41,7 +41,10 @@ AXI traffic, port utilization, and an FSM-state cycle histogram.
 | N_P=4                               | 92.6    | 0.686          | 2.75        | 34%           |
 | **N_P=8 (prev, no write FIFO)**     | 68.7    | 0.926          | 3.70        | 47%           |
 | **N_P=8 + 32-deep write FIFO**      | 67.9    | 0.937          | 3.75        | 48%           |
-| **+ compress double-buffer + overlapped next-block send (now)** | **61.8** | **1.029** | **4.12** | **55%** |
+| **+ compress double-buffer + overlapped next-block send**        | 61.8 | 1.029 | 4.12 | 55%  |
+| **+ dependent fast path / RAW fixes (now, argon2i)**             | **63.4** | **1.003** | **4.01** | **52%** |
+| **+ dependent fast path / RAW fixes (now, argon2d)**             | **63.1** | **1.007** | **4.03** | **49%** |
+| **+ dependent fast path / RAW fixes (now, argon2id)**            | **60.9** | **1.044** | **4.18** | **51%** |
 
 Per-lane IDEAL floor at N_P=8 is now **56.3 cyc/blk (1.13 cand/s)** —
 down from 62.3 — because the double-buffered compressor lets LOAD of the
@@ -78,24 +81,75 @@ COMPRESS state at all). Passes 1–2 keep the serial COMPRESS→WRITE path
 single memory port); that is why the average lands between "all pass 0
 blocks free" and the old number.
 
-### Type sweep (N_P=8, m'=1 MiB, t=3, DDR4)
+### Type sweep (N_P=8, m'=4 MiB, t=3, DDR4)
 
 | Type      | cyc/blk (DDR4) | cand/s/lane | F1×4 | Bottleneck |
 |-----------|----------------|-------------|------|------------|
-| argon2i   | 61.8           | 1.029       | 4.12 | AXI bus ceiling (~1.07) |
-| argon2d   | 97.2           | 0.654       | 2.62 | WRITE/COMPRESS (dependent ref now issued early, see below) |
-| argon2id  | 93.1           | 0.683       | 2.73 | mixed (first half overlaps; second uses early dependent ref) |
+| argon2i   | 63.4           | 1.003       | 4.01 | AXI bus ceiling (~1.07); ~0.7 cyc/blk of prefetch-safety fallbacks |
+| argon2d   | 63.1           | 1.007       | 4.03 | P latency + dep-read tail (see "Dependent fast path" below) |
+| argon2id  | 60.9           | 1.044       | 4.18 | mixed |
 
-(Before the early dependent-ref optimization the d/id rows were 106.7 /
-0.596 / 2.38 and 97.2 / 0.654 / 2.62; see "Early dependent ref" below.)
+All three types now run within ~6% of each other and ~6% of the 200 MHz
+AXI ceiling (~1.07 cand/s/lane). History: before the dependent fast path
+the d/id rows were 97.2 / 0.654 / 2.62 and 93.1 / 0.683 / 2.73; argon2i
+was 61.8 / 1.029 / 4.12 and gives back ~2.5% to the prefetch-safety fix
+(see "Write-FIFO RAW" below) — correctness over a single-type cost.
 
-argon2i benefits from 128-block G prefetch (full compute-latency early)
-and now from the chained overlapped send. For data-dependent blocks,
-J1||J2 is only known from the previous block, so historically the random
-ref read sat on the critical path. The prev read is killed by the
-write-through cache, and **the ref read is now issued early** while block
-K drains (see below); COLLECT_REF dropped ~33% for both argon2d and
-argon2id.
+### Dependent fast path (argon2d / argon2id, all passes)
+
+Two mechanisms, landed one at a time on green KATs:
+
+1. **Early deterministic dest read + dep read in every pass.** The pass>0
+   dest-xor word lives at the *next block's own position* — a fully
+   deterministic address with no data dependence. A COMPRESS-state hook
+   issues it while the read port is idle in dependent mode; the dependent
+   ref read (issued at drain beat 0 as before, now allowed in pass>0 too)
+   queues behind it on the single outstanding read — exactly the schedule
+   the port wants. Measured: argon2d 97.2 → 73.7 cyc/blk (0.654 → 0.863
+   cand/s), argon2id 93.1 → 69.0 (0.683 → 0.922), argon2i bit-identical.
+2. **Stream the returning dep read into the load (DSM_REF).** Instead of
+   waiting for all 16 dep beats and then re-loading them from registers,
+   DISPATCH enters COMPRESS while the dep burst is still in flight: beats
+   already collected replay from dep_q (a `dep_cnt` watermark), the beat
+   currently on the port flows straight into the compressor input, and the
+   load ends with the read instead of after it. Measured on top of (1):
+   argon2d 73.7 → 63.1 (0.863 → 1.007), argon2id 69.0 → 60.9
+   (0.922 → 1.044). The ADVANCE dep_ready wait is relaxed only when the
+   fast path will consume the read live (prev in the write-through cache,
+   dest ready / no xor).
+
+Per-block structure at N_P=8 (DDR4, argon2d): WRITE 43.0 (two P waves +
+16-beat drain, the hard floor), COMPRESS 18.3 (dep-beat-paced load),
+~2 cycles of everything else.
+
+### Write-FIFO RAW + reference-area bugs found by the geometry sweep
+
+Extending KAT coverage past m'=8 (`sim/tb_argon2_axi_sweep.sv`,
+m' ∈ {16,32,64,128} × t ∈ {1,2,3} × i/d/id) exposed two latent bugs in
+previously-landed optimizations — invisible at m'=8 because
+segment_length=2 makes both reference-area mappings coincide and short
+reference distances always clear the 32-beat write FIFO, and the perf
+bench does not check data:
+
+* **Early dependent ref: `same_lane` was never connected** on the
+  `u_area_dep` reference-area instance, so every early dep read used the
+  !same_lane area formula — wrong for essentially every p=1 dependent
+  block at segment_length > 2 (i.e. wrong candidate data at 1 GiB scale).
+* **A prefetched/serial reference to a recently written block could read
+  memory before its write committed.** The wb-hit guard was masked by a
+  cache hit (`wb_hit && !cache_hit`) that nothing ever forwarded from —
+  the documented "if it hits the cache (last block), use cache" behavior
+  did not exist. Fixes: a cache-hit reference is now *forwarded* from the
+  write-through cache at DISPATCH/DREF_SETTLE (no read at all); the wb
+  wait uses the raw hit; prefetches additionally skip when the target is
+  the block being compressed (or being streamed, for the chained K+2
+  prefetch) since those writes have not happened yet. The early-dep issue
+  gained the same raw-FIFO/self gating.
+
+Cost: ~0.7 cyc/blk on argon2i (an occasional serial block instead of a
+chained one when the prefetch was skipped for safety). Both bugs were
+present on main; every KAT now passes at every swept geometry, N_P=1 and
+N_P=8.
 
 ### Early dependent ref (argon2d / argon2id second half)
 
@@ -200,13 +254,15 @@ write handshakes.
   reference designs): same cycle counts → ~1.29 cand/s/lane argon2i,
   ~5.1 F1 (bounded by the 250 MHz AXI ceiling ~1.33). Needs a
   timing-closure pass (the BlaMka mult-add chain is the critical path).
-* **Overlap passes 1–2 (dest-xor)**: the pass>0 blocks still use the
-  serial COMPRESS→WRITE path because the dest-xor read for block N+1
-  cannot complete before N's drain starts with a single memory port.
-  A second outstanding read (or issuing the dest read one block earlier
-  from a computed K+2 address) would extend the chain to ~all blocks:
-  upper bound is the 1.07 @200 MHz AXI ceiling, i.e. the gain is the
-  remaining ~4% plus margin.
+* **Overlap passes 1–2 (dest-xor) for argon2i**: dependent blocks now
+  stream their ref read into the load (DSM_REF), but independent pass>0
+  blocks still take the serial COMPRESS→WRITE path — the chained
+  overlapped send requires everything ready before the drain starts, and
+  the dest read cannot complete that early behind the prefetch on a
+  single port. A watermark-gated (decoupled) send or a dest/pref double
+  buffer would extend the chain to ~all blocks: upper bound is the
+  1.07 @200 MHz AXI ceiling. This is mechanism 5 of
+  `docs/PERFORMANCE_OVERLAP_PLAN.md` and the only big RTL lever left.
 * **Deeper P retiming** (the 2-wave × ~9-cycle P chain is the hard
   floor; 16 P units instead of 8 does not help — the column wave reads
   the row wave's output).
