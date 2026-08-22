@@ -292,9 +292,16 @@ write handshakes.
 ## Remaining headroom (in rough order)
 
 * **250 MHz CL clock** (the F1 shell runs sh_ddr at 250 MHz in the
-  reference designs): same cycle counts → ~1.29 cand/s/lane argon2i,
-  ~5.1 F1 (bounded by the 250 MHz AXI ceiling ~1.33). Needs a
-  timing-closure pass (the BlaMka mult-add chain is the critical path).
+  reference designs): **measured** with the new clock-parameterized perf
+  model (`make -C sim perf250`) — argon2i 1.135, argon2d 1.210, argon2id
+  **1.240 cand/s/lane** (F1×4 = 4.54 / 4.84 / 4.96). +13-20% per type
+  (below the 25% clock ratio: DRAM latency is fixed in ns, so cyc/block
+  rises at the higher clock). The dominant 200→250 MHz closure blocker —
+  a 32-bit divider in `argon2_index` (3 instances) — is already removed
+  (replaced by a conditional subtract, bit-/cycle-identical). Remaining
+  closure is the BlaMka mult-add via DSP48 register-packing (a synth
+  `-retiming` setting, not an RTL change). Full map + checklist:
+  `docs/TIMING_250MHZ.md`.
 * **Overlap passes 1–2 (dest-xor) for argon2i**: the chained overlapped
   send now also fires for independent dest-xor blocks when the next
   block's dest is already collected (`nxt_ok` relaxed from `!with_xor` to
