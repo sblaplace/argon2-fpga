@@ -189,6 +189,47 @@ is pass-0 only; extending it to pass>0 would need to arbitrate against
 the dest-xor read (the two could be tagged/prioritized, but pass>0 is a
 smaller fraction of the t=3 workload).
 
+### Dest-xor chain gate-relaxation (argon2i, IDEAL only)
+
+Mechanism 5 step 1 of the overlap plan: let the chained overlapped send
+fire for independent **dest-xor** (pass>0) blocks, not just pass-0. The
+chain already streams block K+1's `prev` (from the write-through cache)
+and `ref` (from the prefetch) into the compressor's idle buffer during
+K's drain; for pass>0 it additionally needs K+1's `dest`. The compressor
+applies it during the background load (`c_in_dest` already gated on
+`with_xor`), so the datapath needed no change — only the FSM gate:
+
+`nxt_ok` was `... && !with_xor`; it is now `... && (dest_done || !with_xor)`.
+`dest_done` is correct for the *next* block because it is cleared on
+COMPRESS entry and re-armed only by the dest read issued after that
+block's ref prefetch completes. At the chain latch the dest handshake
+flags are cleared (the next block's dest is consumed by the drain, and
+clearing prevents the block after that from chaining on a stale dest),
+and the K+2 early-prefetch (`can_prefetch_n2`) is kept **pass-0 only**:
+for a dest pass its address would be wrong (`dest_next_addr` is
+`curr_idx+1` while `index_r` is still K), so the next block's ref is
+issued from its own DISPATCH[nxt_skip] where `index_r` has advanced and
+the dest address is correct. dest_q is untouched during the drain (no
+dest/prefetch is in flight), so no double-buffer is needed for this step.
+
+Measured (N_P=8, m'=4096, t=3, p=1, 200 MHz):
+
+| Type      | IDEAL cyc/blk before → after | DDR4 cyc/blk before → after |
+|-----------|------------------------------|-----------------------------|
+| argon2i   | 57.4 → 51.6 (1.109 → 1.233 cand/s) | 63.4 → 63.5 (unchanged) |
+| argon2d   | 61.0 → 61.0                  | 63.1 → 63.1 (bit-identical) |
+| argon2id  | 58.6 → 58.6                  | 60.9 → 60.9 (bit-identical) |
+
+Bit-identical against the full KAT suite (fill, fill_rfc, axi, the
+m'∈{16,32,64,128} geometry sweep, the F1 `cl` top, i/d/id, N_P=1 and
+N_P=8). The discipline bench still holds (argon2i pass0 COMPRESS=96 <
+pass1 COMPRESS=145). **The DDR4 number is unchanged** because the dest
+read's DRAM latency exceeds the single-port window before the drain, so
+the chain almost never fires on real memory — only on the IDEAL
+(zero-latency) model. The DDR4 gain is gated on the dest double-buffer
+(prefetch the dest one block earlier, during the previous drain where the
+read port is idle), which is the remaining mechanism-5 step.
+
 The AXI bus ceiling at 200 MHz is 12.8 GB/s ÷ ~11.5 GB traffic per
 1 GiB candidate ≈ **1.07 cand/s/lane** (the shell's 512-bit @ 250 MHz
 raises it to ~1.33). At 1.029 cand/s the argon2i lane is within ~4% of
@@ -251,18 +292,31 @@ write handshakes.
 ## Remaining headroom (in rough order)
 
 * **250 MHz CL clock** (the F1 shell runs sh_ddr at 250 MHz in the
-  reference designs): same cycle counts → ~1.29 cand/s/lane argon2i,
-  ~5.1 F1 (bounded by the 250 MHz AXI ceiling ~1.33). Needs a
-  timing-closure pass (the BlaMka mult-add chain is the critical path).
-* **Overlap passes 1–2 (dest-xor) for argon2i**: dependent blocks now
-  stream their ref read into the load (DSM_REF), but independent pass>0
-  blocks still take the serial COMPRESS→WRITE path — the chained
-  overlapped send requires everything ready before the drain starts, and
-  the dest read cannot complete that early behind the prefetch on a
-  single port. A watermark-gated (decoupled) send or a dest/pref double
-  buffer would extend the chain to ~all blocks: upper bound is the
-  1.07 @200 MHz AXI ceiling. This is mechanism 5 of
-  `docs/PERFORMANCE_OVERLAP_PLAN.md` and the only big RTL lever left.
+  reference designs): **measured** with the new clock-parameterized perf
+  model (`make -C sim perf250`) — argon2i 1.135, argon2d 1.210, argon2id
+  **1.240 cand/s/lane** (F1×4 = 4.54 / 4.84 / 4.96). +13-20% per type
+  (below the 25% clock ratio: DRAM latency is fixed in ns, so cyc/block
+  rises at the higher clock). The dominant 200→250 MHz closure blocker —
+  a 32-bit divider in `argon2_index` (3 instances) — is already removed
+  (replaced by a conditional subtract, bit-/cycle-identical). Remaining
+  closure is the BlaMka mult-add via DSP48 register-packing (a synth
+  `-retiming` setting, not an RTL change). Full map + checklist:
+  `docs/TIMING_250MHZ.md`.
+* **Overlap passes 1–2 (dest-xor) for argon2i**: the chained overlapped
+  send now also fires for independent dest-xor blocks when the next
+  block's dest is already collected (`nxt_ok` relaxed from `!with_xor` to
+  `dest_done || !with_xor`). This lifts the **IDEAL** (compute) floor for
+  argon2i from 57.4 → 51.6 cyc/blk (1.109 → 1.233 cand/s/lane, +11%) —
+  the binding constraint on HBM-class memory and at a higher CL clock.
+  On the **DDR4** model argon2i is unchanged (~63.5 cyc/blk): the dest
+  read is issued only after the ref prefetch completes, so at real DRAM
+  latency it rarely finishes before the drain starts and the chain falls
+  back to the serial path. Closing the DDR4 gap needs the dest prefetched
+  *one block earlier* (during the previous drain, where the read port is
+  idle), which requires a **dest double-buffer** to avoid clobbering the
+  dest being streamed — see "Dest-xor chain gate-relaxation" below. That
+  is mechanism 5 of `docs/PERFORMANCE_OVERLAP_PLAN.md` and the only big
+  RTL lever left.
 * **Deeper P retiming** (the 2-wave × ~9-cycle P chain is the hard
   floor; 16 P units instead of 8 does not help — the column wave reads
   the row wave's output).

@@ -21,10 +21,38 @@ sketched:
   argon2d 97.2 → 63.1 cyc/blk (0.654 → 1.007 cand/s), argon2id
   93.1 → 60.9 (0.683 → 1.044). The dep read now also runs in every pass,
   gated by raw write-FIFO / self hazards.
-* **Mechanism 1 for independent pass>0 blocks (the original step 5)
-  remains open** — that is the chained overlapped send with a
-  watermark-gated or double-buffered dest, worth the remaining ~4–6% for
-  argon2i.
+* **Mechanism 1 for independent pass>0 blocks — partially landed.** The
+  chain gate (`nxt_ok`) is relaxed so a dest-xor block chains whenever
+  the next block's dest is already collected (`dest_done || !with_xor`).
+  This is correct (full KAT suite + geometry sweep green) and lifts the
+  **IDEAL** compute floor for argon2i from 57.4 → 51.6 cyc/blk
+  (1.109 → 1.233 cand/s/lane, +11%) — the binding limit on HBM-class
+  memory and at a higher CL clock. On the **DDR4** model argon2i is
+  unchanged (~63.5 cyc/blk): the dest read is issued only after the ref
+  prefetch, so at real DRAM latency it misses the drain-start window and
+  the chain falls back to serial. The remaining work is the **dest
+  double-buffer**: prefetch the dest one block earlier (during the
+  previous drain, where the read port is idle — the chain loads from
+  registers, not the port) into a second buffer so it does not clobber
+  the dest being streamed. That is the dest/pref double buffer the
+  original step 2 sketched, and the only part of mechanism 5 still open.
+
+  **Why this is a low-priority next step, not a quick win (measured
+  2026-08-22):** the dest double-buffer is *argon2i-only* — argon2id
+  (RFC 9106's recommended type, the one defenders actually use) is
+  *already* the fastest of the three at 1.044 cand/s and is untouched by
+  it (its pass>0 is data-dependent, not independent). And the read port
+  is already ~94% occupied in steady state: the perf bench's "port busy
+  ~52%" counts only DDR command latency (P_RD/P_WR/P_REF), not the ~70%
+  of cycles spent streaming R/W beats (those flow during P_IDLE with
+  `arready` deasserted). So even with the dest prefetched perfectly,
+  argon2i DDR4 can at most match argon2id (~1.04, +4%) before the single
+  port saturates — the IDEAL +11% is unreachable on DDR4. Combined with
+  the rewrite touching the dependent dest paths (PR #12 burned 27
+  commits on this and never went green), the risk/reward is poor. The
+  higher-value levers are the 250 MHz CL clock (helps *all* types,
+  +~25%, bounded by the 250 MHz AXI ceiling ~1.33) and the
+  partitioned-memory p=4 crossbar.
 
 Landing the sweep also exposed and fixed two latent correctness bugs (the
 `u_area_dep` `same_lane` input was never connected; the write-FIFO RAW

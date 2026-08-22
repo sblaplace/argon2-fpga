@@ -82,6 +82,7 @@ PERF_BLKS ?= 4096
 PERF_NP   ?= 1
 PERF_IWR  ?= 0
 PERF_TYPE ?= 1
+PERF_MHZ  ?= 200    # core clock; 250 re-derives the DDR4 cycle counts (see tb_perf)
 
 SRC_tb_perf := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_axi_mm.sv \
@@ -90,24 +91,34 @@ SRC_tb_perf := $(FILL_RTL) \
 
 perf: run-tb_perf
 
+# 250 MHz timing-closure target (F1 sh_ddr geometry): same RTL cycle counts,
+# but the DDR4-2400 model is re-tuned for the 4 ns period so the projected
+# cand/s is realistic. perf-all sweeps all three types at PERF_MHZ.
+perf250: PERF_MHZ = 250
+perf250: perf
+
+perf-all: perf
+	$(MAKE) PERF_TYPE=0 perf
+	$(MAKE) PERF_TYPE=2 perf
+
 ifeq ($(SIM),verilator)
 run-tb_perf: tb_perf.sv tb_ddr4_ram.sv
 	@rm -rf $(OBJ)/tb_perf
 	@mkdir -p $(OBJ)/tb_perf
-	$(VERILATOR) $(VFLAGS) -GNBLK=$(PERF_BLKS) -GN_P=$(PERF_NP) -GIDEAL_WR=$(PERF_IWR) -GTYPE_I=$(PERF_TYPE) --Mdir $(OBJ)/tb_perf --main --exe --cc -o tb_perf tb_perf.sv $(SRC_tb_perf) --top-module tb_perf
+	$(VERILATOR) $(VFLAGS) -GNBLK=$(PERF_BLKS) -GN_P=$(PERF_NP) -GIDEAL_WR=$(PERF_IWR) -GTYPE_I=$(PERF_TYPE) -GPERF_MHZ=$(PERF_MHZ) --Mdir $(OBJ)/tb_perf --main --exe --cc -o tb_perf tb_perf.sv $(SRC_tb_perf) --top-module tb_perf
 	@ln -sf Vtb_perf__pch.h $(OBJ)/tb_perf/Vtb_perf__pch.h.fast
 	@ln -sf Vtb_perf__pch.h $(OBJ)/tb_perf/Vtb_perf__pch.h.slow
 	@$(MAKE) -s -C $(OBJ)/tb_perf -f Vtb_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
 	./$(OBJ)/tb_perf/tb_perf
 else
 tb_perf.out: tb_perf.sv tb_ddr4_ram.sv
-	$(IVERILOG) -g2012 -PNBLK=$(PERF_BLKS) -PN_P=$(PERF_NP) -PIDEAL_WR=$(PERF_IWR) -PTYPE_I=$(PERF_TYPE) -I$(INCDIR) -o $@ $< $(SRC_tb_perf)
+	$(IVERILOG) -g2012 -PNBLK=$(PERF_BLKS) -PN_P=$(PERF_NP) -PIDEAL_WR=$(PERF_IWR) -PTYPE_I=$(PERF_TYPE) -PPERF_MHZ=$(PERF_MHZ) -I$(INCDIR) -o $@ $< $(SRC_tb_perf)
 
 run-tb_perf: tb_perf.out
 	$(VVP) $<
 endif
 
-.PHONY: all blake2b blamka index compress addr fill discipline rfc axi cl perf vectors clean
+.PHONY: all blake2b blamka index compress addr fill discipline rfc axi cl perf perf250 perf-all vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
 all: blake2b blamka index compress addr fill discipline rfc axi axibig sweep

@@ -32,19 +32,39 @@ module tb_perf #(
     parameter int PASSES = 3,      // time cost t
     parameter int N_P    = 1,      // parallel P units in the compression G
     parameter int IDEAL_WR = 0,    // experiment: DDR model with instant writes
-    parameter int TYPE_I = 1       // 0=d, 1=i, 2=id
+    parameter int TYPE_I = 1,      // 0=d, 1=i, 2=id
+    parameter int PERF_MHZ = 200   // core clock (200 = the measured baseline;
+                                   // 250 = the F1 sh_ddr closure target — the
+                                   // DDR4-2400 cycle counts below are derived
+                                   // from this so the projection is real, not
+                                   // a naive 1.25x scale)
 ) (
 );
     localparam int NBEAT  = 16;
     localparam int ADDR_W = 64;
     localparam int ID_W   = 6;
     localparam int DATA_W = 512;
-    localparam real F_MHZ  = 200.0;            // clock rate
+    localparam real F_MHZ  = PERF_MHZ * 1.0;   // clock rate
     localparam real CAND_BLKS = 3.0 * 1048576.0; // compresses per 1 GiB t=3 guess
+
+    // DDR4-2400 timings in core cycles, derived from the clock period so a
+    // single PERF_MHZ override re-tunes the whole model. ceil(ns*MHz/1000)
+    // reproduces the documented @200 MHz values (tCL/tRCD/tRP 3, tWL 3,
+    // tRTW 2, tWTR 2, tRFC 70, tREFI 1560). At 250 MHz tCL/tRCD/tRP/tRTW
+    // grow to 4/4/4/3 — the higher clock buys fewer cycles-per-ns of DRAM
+    // latency, so the cand/s gain is below the 1.25x clock ratio.
+    localparam int T_CL_C   = (14  * PERF_MHZ + 999) / 1000;
+    localparam int T_RCD_C  = (14  * PERF_MHZ + 999) / 1000;
+    localparam int T_RP_C   = (14  * PERF_MHZ + 999) / 1000;
+    localparam int T_WL_C   = (12  * PERF_MHZ + 999) / 1000;
+    localparam int T_RTW_C  = (10  * PERF_MHZ + 999) / 1000;
+    localparam int T_WTR_C  = (8   * PERF_MHZ + 999) / 1000;
+    localparam int T_RFC_C  = (350 * PERF_MHZ + 999) / 1000;
+    localparam int T_REFI_C = (7800* PERF_MHZ + 999) / 1000;
 
     // ---- clock / reset --------------------------------------------------
     logic clk, rst_n;
-    always #2.5 clk = ~clk;    // 200 MHz
+    always #(500.0/PERF_MHZ) clk = ~clk;    // PERF_MHZ MHz
 
     logic [63:0] sim_cycles;
 
@@ -186,7 +206,10 @@ module tb_perf #(
     );
 
     tb_ddr4_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W), .NBLK(NBLK),
-                  .IDEAL_WR(IDEAL_WR)) u_ddr (
+                  .IDEAL_WR(IDEAL_WR),
+                  .T_CL_C(T_CL_C), .T_RCD_C(T_RCD_C), .T_RP_C(T_RP_C),
+                  .T_WL_C(T_WL_C), .T_RTW_C(T_RTW_C), .T_WTR_C(T_WTR_C),
+                  .T_RFC_C(T_RFC_C), .T_REFI_C(T_REFI_C)) u_ddr (
         .clk(clk), .rst_n(rst_n),
         .s_axi_awid('0), .s_axi_awaddr(b_awaddr), .s_axi_awlen(8'd15),
         .s_axi_awsize(3'd6), .s_axi_awvalid(b_awvalid), .s_axi_awready(b_awready),
@@ -295,9 +318,9 @@ module tb_perf #(
         rst_n = 1'b1;
         repeat (4) @(posedge clk);
 
-        $display("tb_perf: m'=%0d blocks (%0d MiB), t=%0d, type=%0d (%s), p=1, 200 MHz, N_P=%0d",
+        $display("tb_perf: m'=%0d blocks (%0d MiB), t=%0d, type=%0d (%s), p=1, %0d MHz, N_P=%0d",
                  NBLK, (NBLK >> 10), PASSES, TYPE_I,
-                 (TYPE_I==0)?"argon2d":(TYPE_I==1)?"argon2i":"argon2id", N_P);
+                 (TYPE_I==0)?"argon2d":(TYPE_I==1)?"argon2i":"argon2id", PERF_MHZ, N_P);
 
         // Phase A: ideal memory
         run_ideal;

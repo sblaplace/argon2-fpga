@@ -191,13 +191,15 @@ cd /path/to/argon2-fpga
 ./fpga/f1/build.sh sim --np 8
 ```
 
+**Timing closure at 250 MHz.** The core, OCL, and all four DDR AXI ports are synchronous on the shell's `clk_main_a0` (250 MHz) — no CDC and no `create_clock` to add (the shell SDC owns it). The one CL-specific synth setting is **DSP48 register-packing for the BlaMka multiply-add** via retiming: source `fpga/f1/build/synth_timing.tcl` into the HDK synthesis tcl (it sets `STEPS.SYNTH_DESIGN.ARGS.RETIMING true` on `synth_1`) before `launch_runs`. The worst pre-existing 200 MHz path — a 32-bit divider in `argon2_index` (3 instances) — is already removed (conditional subtract, bit-identical), so 250 MHz now rests on the BlaMka/DSP axis. Measured target and the full Vivado checklist: `docs/TIMING_250MHZ.md`.
+
 The DCP → AFI flow (`create_fpga_image`, `fpga-load-local-image`) is the standard F1 flow — see `fpga/f1/README.md` and the HDK docs. The checklist above assumes you can already build and load `cl_dram_dma`; `cl_argon2` is a drop-in replacement for its top.
 
 ## 6. What to measure
 
 Once 3a-3c PASS on the RFC vectors, scale to a bandwidth-sized job and measure:
 
-* **1 GiB / t=4 / p=1** — the README's reference: ~4 M compresses, ~4 GB random refs. Time one `GLOBAL_START` → `done` and compute `cand/s = 1 / wall_seconds` per channel. Expect ≈ 1-1.2 cand/s per DDR channel at 200 MHz (≈ 1.25 M G/s, ~1.2 GiB/s random) — four channels ≈ 4-5 cand/s.
+* **1 GiB / t=4 / p=1** — the README's reference: ~4 M compresses, ~4 GB random refs. Time one `GLOBAL_START` → `done` and compute `cand/s = 1 / wall_seconds` per channel. The core runs on the shell's 250 MHz `clk_main_a0`; the measured projection (clock-parameterized perf model, `make -C sim perf250`) is **argon2id 1.240 / argon2d 1.210 / argon2i 1.135 cand/s per channel** — four channels ≈ **4.96 / 4.84 / 4.54 cand/s**. If the build does not yet close at 250 MHz, run the perf bench at the achieved fmax (`make -C sim PERF_MHZ=<fmax> perf`) to get the realistic per-channel number. Full closure map + checklist: `docs/TIMING_250MHZ.md`.
 * **Four simultaneous 1 GiB p=1 jobs** — aggregate cand/s should be about 4× one channel. Measure p=4 only after the owner-channel read crossbar is implemented; its arbitration cost then becomes a separate result.
 * **Burst counters** — add an AXI performance counter on `awlen==15` / `arlen==15` bursts per channel if you want to confirm 512-bit 16-beat is actually issuing.
 
