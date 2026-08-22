@@ -6,7 +6,9 @@
 // bandwidth-critical path is argon2_compress, not this module.
 
 `timescale 1ns / 1ps
+`ifndef BLAKE2B_PKG_SVH
 `include "blake2b_pkg.svh"
+`endif
 
 module blake2b_core #(
     parameter int DIGEST_LEN = 64

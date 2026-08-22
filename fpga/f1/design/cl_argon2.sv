@@ -9,7 +9,10 @@
 //   * FLR / peek / DDR-stat tie-offs
 //
 // The functional logic lives in cl_argon2_core (HDK-independent); this
-// file only adapts the shell buses onto it.
+// file only adapts the shell buses onto it. `A2_CL_TOP` and
+// `A2_DEFAULT_N_P` may be pre-defined by a generated wrapper
+// (`fpga/f1/emit_hdk_top.py`) so the same source can build as the HDK's
+// example top at the N_P point you want.
 //
 // NOTE ON THE DDR PORTS: the buses are FLAT vectors, one bit (or word)
 // slice per channel -- channel n is index n of each DDR_AXI_* signal.
@@ -21,11 +24,21 @@
 
 `timescale 1ns / 1ps
 
+`ifndef CL_ARGON2_DEFINES_VH
 `include "cl_argon2_defines.vh"
+`endif
 
-module cl_argon2 #(
+`ifndef A2_CL_TOP
+`define A2_CL_TOP cl_argon2
+`endif
+
+`ifndef A2_DEFAULT_N_P
+`define A2_DEFAULT_N_P 1
+`endif
+
+module `A2_CL_TOP #(
     parameter int NUM_DDR = `A2_NUM_DDR,
-    parameter int N_P     = 1   // parallel P units in the compression G
+    parameter int N_P     = `A2_DEFAULT_N_P   // parallel P units in the compression G
 ) (
     // ---- clock / reset -------------------------------------------------
     input        clk_main_a0,

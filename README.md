@@ -133,8 +133,10 @@ tests/                unittest against RFC 9106 §5
 make test                              # RFC 7693 + RFC 9106 §5, no simulator needed
 make -C sim                            # Icarus self-checks (needs iverilog)
 make -C sim SIM=verilator              # same benches on Verilator
-make -C sim SIM=verilator NP=8 all cl  # whole suite at the parallel-P point
+make sim-np8                           # full sim suite at the N_P=8 performance point
 make -C sim SIM=verilator NP=8 perf    # cand/s vs. DDR4 timing model
+./fpga/f1/build.sh sim --np 8          # 4-channel CL bench at the same N_P=8 point
+./fpga/f1/build.sh emit-top --np 8     # generate a self-contained HDK top wrapper
 ```
 
 ## References

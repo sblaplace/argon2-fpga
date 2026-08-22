@@ -22,7 +22,9 @@
 
 `timescale 1ns / 1ps
 
+`ifndef CL_ARGON2_DEFINES_VH
 `include "cl_argon2_defines.vh"
+`endif
 
 module cl_argon2_core #(
     parameter int NUM_DDR = `A2_NUM_DDR,

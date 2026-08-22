@@ -1,4 +1,4 @@
-.PHONY: test vectors sim clean
+.PHONY: test vectors sim sim-np8 clean
 
 test:
 	python3 -m unittest discover -s tests -v
@@ -8,6 +8,9 @@ vectors:
 
 sim:
 	$(MAKE) -C sim
+
+sim-np8:
+	$(MAKE) -C sim NP=8
 
 clean:
 	$(MAKE) -C sim clean

@@ -10,7 +10,9 @@
 // Latency: 4 cycles from in_valid to out_valid. One GB / cycle if back-to-back.
 
 `timescale 1ns / 1ps
+`ifndef BLAKE2B_PKG_SVH
 `include "blake2b_pkg.svh"
+`endif
 
 module blamka_g (
     input  logic        clk,
