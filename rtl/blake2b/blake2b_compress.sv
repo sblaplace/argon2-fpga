@@ -3,7 +3,9 @@
 // Used by Argon2 only for H / H' (init + tag), not for the memory fill.
 
 `timescale 1ns / 1ps
+`ifndef BLAKE2B_PKG_SVH
 `include "blake2b_pkg.svh"
+`endif
 
 module blake2b_compress (
     input  logic        clk,

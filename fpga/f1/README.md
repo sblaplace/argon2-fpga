@@ -67,27 +67,30 @@ register file is word-indexed internally (lane L's `LANE_CTRL` is word
    the example's top module to `cl_argon2` (edit the example's build
    manifest). Keep `rtl/` next to it on the include/compile path.
 2. The DDR buses are flat `DDR_AXI_*` vectors (channel n = bit n) so the
-   design elaborates without the HDK. For a real build, edit `cl_argon2.sv`
-   (or write a wrapper) to connect `DDR_AXI_*.w[n]` onto your HDK's
-   per-channel `DDRx_AXI` ports / `axi_bus_t` members from
-   `cl_dram_dma_pkg.sv`. **Diff the port list against your
-   HDK's `cl_ports.vh` / example top** — if your release adds signals the
-   example doesn't (e.g. an OCL `awlen`/`awsize`, or DDR `awregion`), add
-   them to the port list and tie them off.
-3. Build:
+   design elaborates without the HDK. For a real build, connect
+   `DDR_AXI_*.w[n]` onto your HDK's per-channel `DDRx_AXI` ports /
+   `axi_bus_t` members from `cl_dram_dma_pkg.sv`. **Diff the port list
+   against your HDK's `cl_ports.vh` / example top** — if your release adds
+   signals the example doesn't (e.g. an OCL `awlen`/`awsize`, or DDR
+   `awregion`), add them to the port list and tie them off.
+3. Emit an HDK top and build:
    ```
    source $AWS_FPGA_REPO_DIR/hdk_setup.sh
+   ./fpga/f1/build.sh emit-top --np 8 --top-module cl_dram_dma \
+       --out $AWS_FPGA_REPO_DIR/hdk/cl/examples/cl_dram_dma/design/cl_dram_dma.sv
    cd $AWS_FPGA_REPO_DIR/hdk/cl/examples/cl_dram_dma
    aws_build_dcp_from_cl -foreground
    ```
+   `./fpga/f1/build.sh dcp --np 8` wraps the same flow and saves a
+   `cl_dram_dma.sv.argon2.bak` backup before overwriting the example top.
 
 `cl_argon2` and `cl_argon2_core` take an `N_P` parameter (parallel P
 units per compression G). Default 1 is the small core; build with
 `N_P = 8` for the performance point measured in
-[`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md) (~0.93 cand/s/lane at
+[`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md) (~1.03 cand/s/lane at
 200 MHz; ~8× the DSPs of N_P=1, still ~2 kDSP for all four lanes on a
 VU9P). The full KAT suite runs at both points
-(`make -C sim SIM=verilator NP=8 all cl`).
+(`./fpga/f1/build.sh sim --np 8`, or `make -C sim SIM=verilator NP=8 all cl`).
 
 ## First bring-up (the next step)
 

@@ -9,7 +9,9 @@
 // Argon2 compression does *not* use this module — see rtl/argon2/blamka_g.sv.
 
 `timescale 1ns / 1ps
+`ifndef BLAKE2B_PKG_SVH
 `include "blake2b_pkg.svh"
+`endif
 
 module blake2b_g (
     input  logic [63:0] a_i,

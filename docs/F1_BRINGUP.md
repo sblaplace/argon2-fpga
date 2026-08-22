@@ -173,21 +173,22 @@ source $AWS_FPGA_REPO_DIR/hdk_setup.sh
 cd $AWS_FPGA_REPO_DIR/hdk/cl/examples/cl_dram_dma
 
 # Option A: drop fpga/f1/design/* into this example and build in place
-cp -r /path/to/argon2-fpga/fpga/f1/design ./argon2
-cp -r /path/to/argon2-fpga/rtl ./rtl
-cp /path/to/argon2-fpga/fpga/f1/design/cl_argon2_defines.vh ./
+# Emit a self-contained top wrapper for the performance point (N_P=8).
+# The wrapper keeps the real sources in the repo checkout and makes the
+# example compile a single top file named cl_dram_dma.
+./fpga/f1/build.sh emit-top --np 8 --top-module cl_dram_dma \
+    --out $AWS_FPGA_REPO_DIR/hdk/cl/examples/cl_dram_dma/design/cl_dram_dma.sv
 
-# Edit the example manifest so the top is cl_argon2 (or rename cl_argon2.sv
-# to the example's top name). Ensure axi_bus_t matches your HDK release:
-# define AXI_BUS_T_DEFINED and include your HDK's cl_dram_dma_pkg.sv /
-# axi_bus_defines.vh before cl_argon2.sv if needed (see fpga/f1/README.md).
-
+cd $AWS_FPGA_REPO_DIR/hdk/cl/examples/cl_dram_dma
 aws_build_dcp_from_cl -foreground
 
-# Or: standalone lint without the HDK
-cd /path/to/argon2-fpga/fpga/f1
-iverilog -g2012 -I../../rtl/include -I design -o /tmp/cl_argon2.out design/cl_argon2.sv -f filelist.f
-verilator --lint-only -I../../rtl/include -I design -f filelist.f design/cl_argon2.sv
+# Or let the helper emit the wrapper + build it in one step:
+cd /path/to/argon2-fpga
+./fpga/f1/build.sh dcp --np 8
+
+# Or: standalone lint/sim without the HDK
+./fpga/f1/build.sh lint --np 8
+./fpga/f1/build.sh sim --np 8
 ```
 
 The DCP → AFI flow (`create_fpga_image`, `fpga-load-local-image`) is the standard F1 flow — see `fpga/f1/README.md` and the HDK docs. The checklist above assumes you can already build and load `cl_dram_dma`; `cl_argon2` is a drop-in replacement for its top.
