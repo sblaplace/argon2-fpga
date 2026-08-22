@@ -174,10 +174,15 @@ module argon2_fill_ctrl #(
 
     // Overlap eligibility: independent addressing (argon2i / argon2id first
     // half), the next ref already prefetched, prev available from the write
-    // cache, no dest XOR (pass 0), and not at a segment or address-window
-    // boundary. Must be true before the drain starts so the send is aligned
-    // with drain beat 0.
-    assign nxt_ok = independent && pref_ready && cache_valid && !with_xor
+    // cache, the dest-xor word ready when this is a dest pass (dest_done holds
+    // the NEXT block's dest — it is cleared on COMPRESS entry and re-armed only
+    // by the dest read issued after that block's ref prefetch completes), and
+    // not at a segment or address-window boundary. Must be true before the
+    // drain starts so the send is aligned with drain beat 0. For pass>0 the
+    // next block's dest (dest_q) is consumed by the drain just like pass 0's
+    // ref/prev, so the chain extends into the dest-xor path.
+    assign nxt_ok = independent && pref_ready && cache_valid
+                  && (dest_done || !with_xor)
                   && (index_r + 32'd1 < segment_length)
                   && (index_n[6:0] != 7'd0);
 
@@ -823,15 +828,28 @@ module argon2_fill_ctrl #(
                         for (int i=0;i<16;i = i + 1) ref_q[i] <= pref_q[i];
                         // The prefetched ref for this block is consumed by
                         // the copy: clear the handshake flags so ADVANCE
-                        // does not stall. Immediately issue the K+2 prefetch
-                        // (the second addr port is redirected to K+2 during
-                        // this cycle): it completes before the next drain
-                        // starts, so every independent block can overlap.
+                        // does not stall. For pass 0 immediately issue the
+                        // K+2 prefetch (the second addr port is redirected
+                        // to K+2 during this cycle): it completes before the
+                        // next drain starts, so every independent block can
+                        // overlap. K+2 prefetch is pass-0 ONLY: for a dest
+                        // pass the dest address for K+2 would be wrong
+                        // (dest_next_addr is curr_idx+1 = K+1 while index_r
+                        // is still K here), so the next block's ref is issued
+                        // from its own DISPATCH[nxt_skip] — where index_r has
+                        // advanced — and dest_next_addr is then correct.
+                        // dest_q keeps the next block's data for the drain,
+                        // but dest_done is cleared so the block after that
+                        // cannot chain on a stale (already-consumed) dest.
                         pref_ready    <= 1'b0;
                         pref_issued   <= 1'b0;
                         pref_accepted <= 1'b0;
                         pref_beat     <= 5'd0;
-                        if (can_prefetch_n2 && !mem_rd_valid) begin
+                        dest_issued   <= 1'b0;
+                        dest_accepted <= 1'b0;
+                        dest_done     <= 1'b0;
+                        dest_beat     <= 5'd0;
+                        if (can_prefetch_n2 && !with_xor && !mem_rd_valid) begin
                             mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
                             mem_rd_valid <= 1'b1;
                             pref_issued <= 1'b1;

@@ -21,10 +21,21 @@ sketched:
   argon2d 97.2 → 63.1 cyc/blk (0.654 → 1.007 cand/s), argon2id
   93.1 → 60.9 (0.683 → 1.044). The dep read now also runs in every pass,
   gated by raw write-FIFO / self hazards.
-* **Mechanism 1 for independent pass>0 blocks (the original step 5)
-  remains open** — that is the chained overlapped send with a
-  watermark-gated or double-buffered dest, worth the remaining ~4–6% for
-  argon2i.
+* **Mechanism 1 for independent pass>0 blocks — partially landed.** The
+  chain gate (`nxt_ok`) is relaxed so a dest-xor block chains whenever
+  the next block's dest is already collected (`dest_done || !with_xor`).
+  This is correct (full KAT suite + geometry sweep green) and lifts the
+  **IDEAL** compute floor for argon2i from 57.4 → 51.6 cyc/blk
+  (1.109 → 1.233 cand/s/lane, +11%) — the binding limit on HBM-class
+  memory and at a higher CL clock. On the **DDR4** model argon2i is
+  unchanged (~63.5 cyc/blk): the dest read is issued only after the ref
+  prefetch, so at real DRAM latency it misses the drain-start window and
+  the chain falls back to serial. The remaining work is the **dest
+  double-buffer**: prefetch the dest one block earlier (during the
+  previous drain, where the read port is idle — the chain loads from
+  registers, not the port) into a second buffer so it does not clobber
+  the dest being streamed. That is the dest/pref double buffer the
+  original step 2 sketched, and the only part of mechanism 5 still open.
 
 Landing the sweep also exposed and fixed two latent correctness bugs (the
 `u_area_dep` `same_lane` input was never connected; the write-FIFO RAW
