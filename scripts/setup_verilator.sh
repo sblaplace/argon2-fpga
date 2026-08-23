@@ -73,6 +73,20 @@ ensure_verilator() {
     if [[ ! -x "$VENV_DIR/bin/python" ]]; then
         python3 -m venv "$VENV_DIR"
     fi
+
+    if [[ -x "$VENV_DIR/bin/verilator-cli" ]] && \
+       "$VENV_DIR/bin/python" - <<PY >/dev/null 2>&1
+from importlib import metadata
+import sys
+try:
+    sys.exit(0 if metadata.version("verilator") == ${VERILATOR_PYPI_VERSION@Q} else 1)
+except Exception:
+    sys.exit(1)
+PY
+    then
+        return
+    fi
+
     "$VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
     "$VENV_DIR/bin/python" -m pip install "verilator==$VERILATOR_PYPI_VERSION" >/dev/null
 }
