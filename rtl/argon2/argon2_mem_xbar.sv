@@ -116,10 +116,12 @@ module argon2_mem_xbar #(
     // ---- read path -------------------------------------------------------
     // Per-lane 1-deep request queue: accepts the controller's request the
     // cycle it is offered (contract #1), decoupling the lane port from
-    // channel arbitration.
-    logic [LANES-1:0]           q_valid;
-    logic [LANES-1:0][ADDR_W-1:0] q_addr;
-    logic [LANES-1:0][OW-1:0]   q_owner;
+    // channel arbitration. (Storage uses unpacked arrays / flat packed
+    // vectors with single variable indices — the construct set the Icarus
+    // benches already rely on; no double-indexed packed selects.)
+    logic [LANES-1:0]  q_valid;
+    logic [ADDR_W-1:0] q_addr  [0:LANES-1];
+    logic [OW-1:0]     q_owner [0:LANES-1];
 
     // Per-channel FSM: IDLE (arbitrate a queued request) -> CMD -> RESP.
     localparam logic [1:0] X_IDLE = 2'd0, X_CMD = 2'd1, X_RESP = 2'd2;
@@ -151,9 +153,9 @@ module argon2_mem_xbar #(
         assign l_rd_ready[i] = !q_valid[i] && !lbusy[i];
     end
 
-    // Arbitration: cand[c][i] = lane i has a queued request owned by c and
-    // is free to be issued. Round-robin winner per channel.
-    logic [LANES-1:0][LANES-1:0] cand, grant;
+    // Arbitration: cand[c*LANES+i] = lane i has a queued request owned by
+    // channel c and is free to be issued. Round-robin winner per channel.
+    logic [LANES*LANES-1:0] cand, grant;
 
     function automatic logic [LANES-1:0] xrot(
         input logic [LANES-1:0] v, input int n
@@ -164,13 +166,14 @@ module argon2_mem_xbar #(
     endfunction
 
     always_comb begin
-        logic [LANES-1:0] rot_req, rot_mask;
+        logic [LANES-1:0] cv, rot_mask;
         for (int c = 0; c < LANES; c++) begin
             for (int i = 0; i < LANES; i++)
-                cand[c][i] = q_valid[i] && !lbusy[i]
-                             && (32'(q_owner[i]) == 32'(c));
-            rot_mask = xrot(cand[c], int'(rr[c])) & (~xrot(cand[c], int'(rr[c])) + 1'b1);
-            grant[c] = xrot(rot_mask, LANES - int'(rr[c]));
+                cand[c*LANES + i] = q_valid[i] && !lbusy[i]
+                                    && (32'(q_owner[i]) == 32'(c));
+            cv = cand[c*LANES +: LANES];
+            rot_mask = xrot(cv, int'(rr[c])) & (~xrot(cv, int'(rr[c])) + 1'b1);
+            grant[c*LANES +: LANES] = xrot(rot_mask, LANES - int'(rr[c]));
         end
     end
 
@@ -196,10 +199,10 @@ module argon2_mem_xbar #(
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            q_valid <= '0;
             for (int i = 0; i < LANES; i++) begin
-                q_valid[i]  <= 1'b0;
-                q_addr[i]   <= '0;
-                q_owner[i]  <= '0;
+                q_addr[i]  <= '0;
+                q_owner[i] <= '0;
             end
             for (int c = 0; c < LANES; c++) begin
                 st[c]    <= X_IDLE;
@@ -213,16 +216,16 @@ module argon2_mem_xbar #(
                 if (l_rd_valid[i] && l_rd_ready[i]) begin
                     q_valid[i] <= 1'b1;
                     q_addr[i]  <= l_rd_addr[i];
-                    q_owner[i] <= l_rd_owner[i][OW-1:0];
+                    q_owner[i] <= l_rd_owner[i];   // truncates to OW bits
                 end
             end
             for (int c = 0; c < LANES; c++) begin
                 case (st[c])
                     X_IDLE: begin
-                        if (|cand[c]) begin
-                            // grant[c] is one-hot: exactly one match fires.
+                        if (|cand[c*LANES +: LANES]) begin
+                            // grant row is one-hot: exactly one match fires.
                             for (int k = LANES-1; k >= 0; k--) begin
-                                if (grant[c][k]) begin
+                                if (grant[c*LANES + k]) begin
                                     tag[c] <= OW'(k);
                                     caddr[c] <= ADDR_W'(64'(q_addr[k])
                                                        - 64'(c) * 64'(lane_length));
