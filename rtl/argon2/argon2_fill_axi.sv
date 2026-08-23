@@ -98,6 +98,7 @@ module argon2_fill_axi #(
         .mem_rd_valid  (mem_rd_valid),
         .mem_rd_ready  (mem_rd_ready),
         .mem_rd_addr   (mem_rd_addr),
+        .mem_rd_owner  (),   // p=1 unit: no crossbar, owner always 0
         .mem_rd_data_v (mem_rd_data_v),
         .mem_rd_data   (mem_rd_data),
         .mem_rd_last   (mem_rd_last),

@@ -53,6 +53,13 @@ SRC_tb_argon2_axi_big   := $(SRC_tb_argon2_axi)
 # early-ref reference area and write-FIFO RAW distances that m'=8 cannot see.
 SRC_tb_argon2_axi_sweep := $(SRC_tb_argon2_axi)
 
+# Partitioned-memory p=4: four fill controllers + the read crossbar + four
+# separate local-addressed memories (RFC 9106 5 vector + p4 geometry sweep).
+SRC_tb_argon2_p4 := \
+	$(FILL_RTL) \
+	$(RTL)/argon2/argon2_fill_job.sv \
+	$(RTL)/argon2/argon2_mem_xbar.sv
+
 # ---- F1 CL top-level bench ------------------------------------------------
 F1DES := ../fpga/f1/design
 
@@ -89,6 +96,21 @@ SRC_tb_perf := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_fill_axi.sv \
 	tb_ddr4_ram.sv
 
+# Partitioned-memory p=4 perf bench: one candidate over 4 independent
+# DDR4-2400 channels through argon2_mem_xbar (see tb_p4_perf header).
+P4_BLKS ?= 16384
+P4_NP   ?= 1
+P4_TYPE ?= 1
+P4_MHZ  ?= 200
+
+SRC_tb_p4_perf := $(FILL_RTL) \
+	$(RTL)/argon2/argon2_fill_job.sv \
+	$(RTL)/argon2/argon2_mem_xbar.sv \
+	$(RTL)/argon2/argon2_axi_mm.sv \
+	tb_ddr4_ram.sv
+
+p4perf: run-tb_p4_perf
+
 perf: run-tb_perf
 
 # 250 MHz timing-closure target (F1 sh_ddr geometry): same RTL cycle counts,
@@ -102,6 +124,15 @@ perf-all: perf
 	$(MAKE) PERF_TYPE=2 perf
 
 ifeq ($(SIM),verilator)
+run-tb_p4_perf: tb_p4_perf.sv tb_ddr4_ram.sv
+	@rm -rf $(OBJ)/tb_p4_perf
+	@mkdir -p $(OBJ)/tb_p4_perf
+	$(VERILATOR) $(VFLAGS) -GNBLK=$(P4_BLKS) -GN_P=$(P4_NP) -GTYPE_I=$(P4_TYPE) -GPERF_MHZ=$(P4_MHZ) --Mdir $(OBJ)/tb_p4_perf --main --exe --cc -o tb_p4_perf tb_p4_perf.sv $(SRC_tb_p4_perf) --top-module tb_p4_perf
+	@ln -sf Vtb_p4_perf__pch.h $(OBJ)/tb_p4_perf/Vtb_p4_perf__pch.h.fast
+	@ln -sf Vtb_p4_perf__pch.h $(OBJ)/tb_p4_perf/Vtb_p4_perf__pch.h.slow
+	@$(MAKE) -s -C $(OBJ)/tb_p4_perf -f Vtb_p4_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
+	./$(OBJ)/tb_p4_perf/tb_p4_perf
+
 run-tb_perf: tb_perf.sv tb_ddr4_ram.sv
 	@rm -rf $(OBJ)/tb_perf
 	@mkdir -p $(OBJ)/tb_perf
@@ -118,10 +149,22 @@ run-tb_perf: tb_perf.out
 	$(VVP) $<
 endif
 
-.PHONY: all blake2b blamka index compress addr fill discipline rfc axi cl perf perf250 perf-all vectors clean
+ifeq ($(SIM),verilator)
+p4perf250: P4_MHZ = 250
+p4perf250: p4perf
+else
+tb_p4_perf.out: tb_p4_perf.sv tb_ddr4_ram.sv
+	$(IVERILOG) -g2012 -PNBLK=$(P4_BLKS) -GN_P=$(P4_NP) -PTYPE_I=$(P4_TYPE) -PPERF_MHZ=$(P4_MHZ) -I$(INCDIR) -o $@ $< $(SRC_tb_p4_perf)
+
+p4perf250: P4_MHZ = 250
+p4perf250: tb_p4_perf.out
+	$(VVP) $<
+endif
+
+.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 axi axibig sweep cl perf p4perf perf250 perf-all vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
-all: blake2b blamka index compress addr fill discipline rfc axi axibig sweep
+all: blake2b blamka index compress addr fill discipline rfc p4 axi axibig sweep
 
 vectors: $(GEN)/fill_i_init.hex
 
@@ -137,6 +180,7 @@ addr:    run-tb_argon2_addr_gen
 fill:    vectors run-tb_argon2_fill
 discipline: vectors run-tb_argon2_fill_discipline
 rfc:     vectors run-tb_argon2_fill_rfc
+p4:      vectors run-tb_argon2_p4
 axi:     vectors run-tb_argon2_axi
 axibig:  vectors run-tb_argon2_axi_big
 sweep:   vectors run-tb_argon2_axi_sweep

@@ -122,9 +122,17 @@ A single p>1 job is different: Argon2 may select a reference block from
 another lane. Banking lane L in channel L therefore requires a read crossbar
 that routes each request to the reference lane's owner channel and returns
 its tagged response. The slice barrier is necessary but not sufficient.
-`argon2_fill_job` is functionally verified against a shared simulation RAM;
-the current F1 CL has the barrier but not this cross-channel read router, so
-its p4 mode must remain disabled on hardware.
+That router now exists: **`argon2_mem_xbar`** (see
+`docs/PERFORMANCE.md` → "Partitioned-memory p=4") routes each fill
+controller's read to the owning channel using the controller's
+`mem_rd_owner` hint (no runtime division, no power-of-two assumption on
+`lane_length`), translates global→local block indices, passes writes
+through 1:1, and tag-routes the 16-beat responses back. It is verified in
+simulation (`tb_argon2_p4`: RFC 9106 §5 + geometry sweep incl. a
+non-power-of-two lane_length, at N_P=1 and N_P=8) and measured against four
+cycle-accurate DDR4 channels (`tb_p4_perf`: 1×p=4 ≈ 3.0 cand/s on 4
+channels at 200 MHz). The F1 CL does not yet instantiate it — the host API
+still drives four independent p=1 jobs.
 
 Alveo U50 is the same picture with 32 HBM pseudo-channels.
 

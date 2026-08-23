@@ -34,7 +34,7 @@ SIM_DIR = os.path.join(ROOT, "sim")
 PASS_MARKER = "PASS"
 
 SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
-               "fill", "discipline", "rfc", "axi", "axibig", "sweep", "cl"]
+               "fill", "discipline", "rfc", "p4", "axi", "axibig", "sweep", "cl"]
 PER_TARGET_TIMEOUT = 300  # seconds; the geometry sweep is the long pole
 # (~30 s on Verilator NP=1; Icarus/vvp is several times slower)
 # N_P matrix: run the whole suite at every value in N_P_MATRIX (the Makefile

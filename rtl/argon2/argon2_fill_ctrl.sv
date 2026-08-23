@@ -23,6 +23,12 @@ module argon2_fill_ctrl #(
     output logic              mem_rd_valid,
     input  logic              mem_rd_ready,
     output logic [ADDR_W-1:0] mem_rd_addr,
+    // Owning memory channel of the read currently on mem_rd_addr (the
+    // reference LANE for ref / dependent-ref reads, lane_id for prev /
+    // dest reads). Held stable with the address; used by argon2_mem_xbar
+    // for partitioned-memory p>1 routing. 4 bits -> up to 16 lanes; 0 for
+    // every p=1 job.
+    output logic [3:0]        mem_rd_owner,
     input  logic              mem_rd_data_v,
     input  logic [511:0]      mem_rd_data,
     input  logic              mem_rd_last,
@@ -239,8 +245,11 @@ module argon2_fill_ctrl #(
     // reference lane is forced to the own lane (RFC 9106 §3.3); afterwards it
     // is J2 % lanes, exactly like the serial path (ref_lane).
     logic dep_same_lane;
+    logic [31:0] dep_lane;
     assign dep_same_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
                          ? 1'b1 : ((dep_j1[63:32] % lanes) == lane_id);
+    assign dep_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
+                    ? lane_id : (dep_j1[63:32] % lanes);
     argon2_ref_area u_area_dep (
         .pass(pass_r), .slice(slice_r), .index(index_n),
         .lane_length(lane_length), .segment_length(segment_length),
@@ -250,12 +259,7 @@ module argon2_fill_ctrl #(
         .j1(dep_j1[31:0]), .ref_area(dep_area), .start_position(dep_spos),
         .lane_length(lane_length), .ref_index(dep_z)
     );
-    always_comb begin
-        if ((pass_r == 32'd0) && (slice_r == 32'd0))
-            dep_ridx = lane_id * lane_length + dep_z;
-        else
-            dep_ridx = (dep_j1[63:32] % lanes) * lane_length + dep_z;
-    end
+    assign dep_ridx = dep_lane * lane_length + dep_z;
     // dep_self: target is the block being written right now (K — its beats
     // are entering the write FIFO this drain and the RAM copy is stale until
     // commit) or the not-yet-computed K+1. dep_wb_hit: target still sits
@@ -349,6 +353,7 @@ module argon2_fill_ctrl #(
             dstream <= DSM_NONE;
             sync_req <= 1'b0;
             mem_rd_addr <= '0;
+            mem_rd_owner <= 4'd0;
             dep_beat <= 5'd0;
             dep_cnt  <= 5'd0;
             dep_issued <= 1'b0; dep_accepted <= 1'b0; dep_ready <= 1'b0;
@@ -409,6 +414,7 @@ module argon2_fill_ctrl #(
                         pref_beat <= 5'd0;
                         if (with_xor && !dest_last_blk && !dest_issued && !mem_rd_valid) begin
                             mem_rd_addr <= dest_next_addr[ADDR_W-1:0];
+                            mem_rd_owner <= lane_id[3:0];
                             mem_rd_valid <= 1'b1;
                             dest_issued <= 1'b1;
                             dest_beat <= 5'd0;
@@ -511,6 +517,7 @@ module argon2_fill_ctrl #(
                         nxt_sent    <= 1'b0;
                         if (can_prefetch && !pref_issued && !pref_ready && !mem_rd_valid) begin
                             mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
+                            mem_rd_owner <= ref_lane_n[3:0];
                             mem_rd_valid <= 1'b1;
                             pref_issued <= 1'b1;
                             pref_beat <= 5'd0;
@@ -531,8 +538,6 @@ module argon2_fill_ctrl #(
                                     state <= DEST_WAIT;
                                 end else begin
                                     dstream <= DSM_DEST;
-                                    mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
                                     state <= ISSUE_DEST;
                                 end
                             end else begin
@@ -541,8 +546,6 @@ module argon2_fill_ctrl #(
                                 dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                             end
                         end else begin
-                            mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
                             state <= ISSUE_PREV;
                         end
                     end else if (independent) begin
@@ -564,8 +567,6 @@ module argon2_fill_ctrl #(
                                         state <= DEST_WAIT;
                                     end else begin
                                         dstream <= DSM_DEST;
-                                        mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                        mem_rd_valid <= 1'b1;
                                         state <= ISSUE_DEST;
                                     end
                                 end else begin
@@ -574,15 +575,11 @@ module argon2_fill_ctrl #(
                                     dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                                 end
                             end else begin
-                                mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                                mem_rd_valid <= 1'b1;
                                 state <= ISSUE_PREV;
                             end
                         end else if (wb_hit_ref) state <= DISPATCH;  // wait FIFO drain (raw)
                         else begin
                             dstream <= DSM_NONE;
-                            mem_rd_addr <= ref_idx[ADDR_W-1:0];
-                            mem_rd_valid <= 1'b1;
                             state <= ISSUE_REF;
                         end
                     end else if (!independent && dep_ready && (dep_idx == index_r)
@@ -629,8 +626,6 @@ module argon2_fill_ctrl #(
                         state <= DREF_SETTLE;
                     end else begin
                         dstream <= DSM_NONE;
-                        mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
                         state <= ISSUE_PREV;
                     end
                 end
@@ -647,8 +642,6 @@ module argon2_fill_ctrl #(
                             if (dest_issued) state <= DEST_WAIT;
                             else begin
                                 dstream <= DSM_DEST;
-                                mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                mem_rd_valid <= 1'b1;
                                 state <= ISSUE_DEST;
                             end
                         end else begin
@@ -656,11 +649,7 @@ module argon2_fill_ctrl #(
                             dest_issued <= 1'b0; dest_accepted <= 1'b0; dest_done <= 1'b0;
                         end
                     end else if (wb_hit_ref) state <= DREF_SETTLE;  // wait drain (raw)
-                    else begin
-                        mem_rd_addr <= ref_idx[ADDR_W-1:0];
-                        mem_rd_valid <= 1'b1;
-                        state <= ISSUE_REF;
-                    end
+                    else state <= ISSUE_REF;
                 end
                 DEST_WAIT: begin
                     if (dest_done) begin
@@ -670,7 +659,18 @@ module argon2_fill_ctrl #(
                     end
                 end
                 ISSUE_REF: begin
-                    if (mem_rd_ready) begin
+                    // Place THIS state's request only when the port is free:
+                    // an earlier hook-issued request (early dest / dep / K+2
+                    // prefetch) may still be waiting for acceptance, and
+                    // overwriting it would corrupt both collectors. The port
+                    // is only accepted when the lane's stream has drained,
+                    // so after placement the next beats on the port belong
+                    // to this request.
+                    if (!mem_rd_valid) begin
+                        mem_rd_addr  <= ref_idx[ADDR_W-1:0];
+                        mem_rd_owner <= ref_lane[3:0];
+                        mem_rd_valid <= 1'b1;
+                    end else if (mem_rd_ready) begin
                         mem_rd_valid <= 1'b0;
                         state <= COLLECT_REF;
                     end
@@ -681,8 +681,6 @@ module argon2_fill_ctrl #(
                         if (mem_rd_last || beat == 5'd15) begin
                             beat <= 5'd0;
                             if (independent) begin
-                                mem_rd_addr <= prev_idx[ADDR_W-1:0];
-                                mem_rd_valid <= 1'b1;
                                 state <= ISSUE_PREV;
                             end else if (with_xor) begin
                                 if (dest_done) begin
@@ -696,8 +694,6 @@ module argon2_fill_ctrl #(
                                     state <= DEST_WAIT;
                                 end else begin
                                     dstream <= DSM_DEST;
-                                    mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
                                     state <= ISSUE_DEST;
                                 end
                             end else begin
@@ -708,7 +704,12 @@ module argon2_fill_ctrl #(
                     end
                 end
                 ISSUE_PREV: begin
-                    if (mem_rd_ready) begin
+                    // See ISSUE_REF: place only on a free port.
+                    if (!mem_rd_valid) begin
+                        mem_rd_addr  <= prev_idx[ADDR_W-1:0];
+                        mem_rd_owner <= lane_id[3:0];
+                        mem_rd_valid <= 1'b1;
+                    end else if (mem_rd_ready) begin
                         mem_rd_valid <= 1'b0;
                         state <= COLLECT_PREV;
                     end
@@ -721,8 +722,6 @@ module argon2_fill_ctrl #(
                             if (!independent) begin
                                 if (wb_hit_ref || cache_hit_ref) state <= DREF_SETTLE;
                                 else begin
-                                    mem_rd_addr <= ref_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
                                     state <= ISSUE_REF;
                                 end
                             end else if (with_xor) begin
@@ -735,8 +734,6 @@ module argon2_fill_ctrl #(
                                     state <= DEST_WAIT;
                                 end else begin
                                     dstream <= DSM_DEST;
-                                    mem_rd_addr <= curr_idx[ADDR_W-1:0];
-                                    mem_rd_valid <= 1'b1;
                                     state <= ISSUE_DEST;
                                 end
                             end else begin
@@ -747,7 +744,14 @@ module argon2_fill_ctrl #(
                     end
                 end
                 ISSUE_DEST: begin
-                    if (mem_rd_ready) begin
+                    // See ISSUE_REF: place only on a free port. Every
+                    // ISSUE_DEST user reads the block's own position (the
+                    // pass>0 dest-xor source).
+                    if (!mem_rd_valid) begin
+                        mem_rd_addr  <= curr_idx[ADDR_W-1:0];
+                        mem_rd_owner <= lane_id[3:0];
+                        mem_rd_valid <= 1'b1;
+                    end else if (mem_rd_ready) begin
                         mem_rd_valid <= 1'b0;
                         state <= (dstream != DSM_NONE) ? COMPRESS : COLLECT_DEST;
                     end
@@ -765,6 +769,7 @@ module argon2_fill_ctrl #(
                 COMPRESS: begin
                     if (can_prefetch && !pref_issued && !pref_ready && !mem_rd_valid) begin
                         mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
+                        mem_rd_owner <= ref_lane_n[3:0];
                         mem_rd_valid <= 1'b1;
                         pref_issued <= 1'b1;
                         pref_beat <= 5'd0;
@@ -784,6 +789,7 @@ module argon2_fill_ctrl #(
                         && !dest_issued && !dest_accepted && !dest_done
                         && !mem_rd_valid) begin
                         mem_rd_addr  <= dest_next_addr[ADDR_W-1:0];
+                        mem_rd_owner <= lane_id[3:0];
                         mem_rd_valid <= 1'b1;
                         dest_issued  <= 1'b1;
                         dest_beat    <= 5'd0;
@@ -812,6 +818,7 @@ module argon2_fill_ctrl #(
                     end
                     if (dep_can) begin
                         mem_rd_addr <= dep_ridx[ADDR_W-1:0];
+                        mem_rd_owner <= dep_lane[3:0];
                         mem_rd_valid <= 1'b1;
                         dep_issued <= 1'b1;
                         dep_beat <= 5'd0;
@@ -851,6 +858,7 @@ module argon2_fill_ctrl #(
                         dest_beat     <= 5'd0;
                         if (can_prefetch_n2 && !with_xor && !mem_rd_valid) begin
                             mem_rd_addr <= ref_idx_n[ADDR_W-1:0];
+                            mem_rd_owner <= ref_lane_n[3:0];
                             mem_rd_valid <= 1'b1;
                             pref_issued <= 1'b1;
                             pref_beat   <= 5'd0;

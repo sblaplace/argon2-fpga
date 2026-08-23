@@ -91,6 +91,26 @@ def dump_sweep(m: int, t: int, type_: Type, stem: str) -> None:
     print(f"{stem} tag {tag.hex()}")
 
 
+def dump_p4(m: int, t: int, type_: Type, stem: str) -> None:
+    """p=4 KAT at an arbitrary geometry for the partitioned-memory bench
+    (tb_argon2_p4): four controllers + the read crossbar + four LOCAL
+    memories. m' must be a multiple of 8*p (RFC 9106 s2.4); lane_length
+    m'/4 need NOT be a power of two (m'=48 exercises a non-pow2 segment
+    length, which the crossbar's subtract-based addressing allows)."""
+    kw = dict(
+        time_cost=t,
+        memory_cost=m,
+        parallelism=4,
+        hash_len=32,
+        type_=type_,
+    )
+    init = argon2_init_memory(b"password", b"somesalt", **kw)
+    tag, final = argon2_fill(b"password", b"somesalt", **kw)
+    write_mem_hex(GEN / f"{stem}_init.hex", init)
+    write_mem_hex(GEN / f"{stem}_exp.hex", final)
+    print(f"{stem} tag {tag.hex()}")
+
+
 def main() -> None:
     v = [IV[0], IV[1], IV[2], IV[3]] + [0] * 12
     blake2b_g(v, 0, 1, 2, 3, 1, 2)
@@ -126,6 +146,13 @@ def main() -> None:
             for t in (1, 2, 3):
                 if t == 3 or m in (16,) or (m, tn) in ((128, "id"),):
                     dump_sweep(m, t, tt, f"sweep_{tn}_m{m}t{t}")
+    # tb_argon2_p4: partitioned-memory p=4 (RFC official vector + geometries;
+    # m'=48 keeps a non-power-of-two lane_length in coverage)
+    for m in (64, 128):
+        for tn, tt_ in (("i", Type.I), ("d", Type.D), ("id", Type.ID)):
+            for t in (1, 3):
+                dump_p4(m, t, tt_, f"p4sweep_{tn}_m{m}t{t}")
+    dump_p4(48, 2, Type.ID, "p4sweep_id_m48t2")
     dump_rfc(Type.I, "rfc_i")
     dump_rfc(Type.D, "rfc_d")
     dump_rfc(Type.ID, "rfc_id")
