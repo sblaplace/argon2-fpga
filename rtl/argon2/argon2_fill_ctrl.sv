@@ -47,6 +47,50 @@ module argon2_fill_ctrl #(
     } state_t;
     state_t state;
 
+    // Hot-path lane arithmetic: keep common p counts (the ones this repo
+    // actually builds today: p=1 and p=4, plus the usual 2/8/16 powers of
+    // two) on pure bit slicing / shift-adds so synthesis does not drop a
+    // runtime divider or full-width multiplier onto the ref-lane path.
+    // Odd/non-power-of-two lane counts still fall back to the generic
+    // modulo / multiply and remain functionally supported.
+    function automatic logic [31:0] lane_mod(
+        input logic [31:0] j2,
+        input logic [31:0] lane_count
+    );
+        begin
+            unique case (lane_count)
+                32'd1:  lane_mod = 32'd0;
+                32'd2:  lane_mod = {31'd0, j2[0]};
+                32'd4:  lane_mod = {30'd0, j2[1:0]};
+                32'd8:  lane_mod = {29'd0, j2[2:0]};
+                32'd16: lane_mod = {28'd0, j2[3:0]};
+                default: lane_mod = j2 % lane_count;
+            endcase
+        end
+    endfunction
+
+    function automatic logic [31:0] lane_offset(
+        input logic [31:0] lane_sel,
+        input logic [31:0] lane_len,
+        input logic [31:0] lane_count
+    );
+        logic [31:0] add0, add1, add2, add3;
+        begin
+            add0 = lane_sel[0] ? lane_len        : 32'd0;
+            add1 = lane_sel[1] ? (lane_len << 1) : 32'd0;
+            add2 = lane_sel[2] ? (lane_len << 2) : 32'd0;
+            add3 = lane_sel[3] ? (lane_len << 3) : 32'd0;
+            unique case (lane_count)
+                32'd1:  lane_offset = 32'd0;
+                32'd2:  lane_offset = add0;
+                32'd4:  lane_offset = add0 + add1;
+                32'd8:  lane_offset = add0 + add1 + add2;
+                32'd16: lane_offset = add0 + add1 + add2 + add3;
+                default: lane_offset = lane_sel * lane_len;
+            endcase
+        end
+    endfunction
+
     logic [31:0] pass_r, slice_r, index_r;
     logic [31:0] segment_length;
     logic [31:0] curr_idx, prev_idx, ref_idx, ref_lane;
@@ -102,36 +146,38 @@ module argon2_fill_ctrl #(
     logic        nxt_sent;      // all 16 beats sent
     logic        nxt_skip;      // next DISPATCH must skip data setup
 
-    // Write FIFO 32 deep streaming
+    // Write FIFO 32 deep streaming.
+    // One Argon2 block is always exactly 16 beats. In a 32-beat FIFO the
+    // queued stream can therefore contain at most THREE distinct block
+    // addresses at a time: a partially drained head block, one full middle
+    // block, and the current tail block being pushed. Track those block-level
+    // addresses explicitly and do RAW detection against them instead of
+    // OR-reducing 32 per-beat compares on the read-issue hot path.
     localparam int WB_DEPTH = 32;
+    localparam int WB_ADDR_SLOTS = 3;
     logic [511:0] wb_data [0:WB_DEPTH-1];
     logic [ADDR_W-1:0] wb_addr [0:WB_DEPTH-1];
     logic         wb_last [0:WB_DEPTH-1];
     logic [5:0]   wb_wptr, wb_rptr;
     logic [5:0]   wb_count;
     logic [4:0]   wb_wbeat;
+    logic [1:0]   wb_addr_count;
+    logic [ADDR_W-1:0] wb_addr_q [0:WB_ADDR_SLOTS-1];
 
     logic wb_hit_ref, wb_hit_ref_n;
     logic cache_hit_ref, cache_hit_ref_n;
     logic dep_wb_hit;   // early-dep target still uncommitted in the write FIFO
 
     always_comb begin
-        wb_hit_ref = 1'b0;
-        wb_hit_ref_n = 1'b0;
-        dep_wb_hit = 1'b0;
-        for (int ii=0; ii<WB_DEPTH; ii = ii + 1) begin
-            logic in_fifo;
-            in_fifo = 1'b0;
-            if (wb_count != 0) begin
-                if (wb_wptr >= wb_rptr) in_fifo = (ii >= wb_rptr && ii < wb_wptr);
-                else in_fifo = (ii >= wb_rptr || ii < wb_wptr);
-            end
-            if (in_fifo) begin
-                if (wb_addr[ii] == ref_idx[ADDR_W-1:0]) wb_hit_ref = 1'b1;
-                if (wb_addr[ii] == ref_idx_n[ADDR_W-1:0]) wb_hit_ref_n = 1'b1;
-                if (wb_addr[ii] == dep_ridx[ADDR_W-1:0]) dep_wb_hit = 1'b1;
-            end
-        end
+        wb_hit_ref   = ((wb_addr_count != 0) && (wb_addr_q[0] == ref_idx[ADDR_W-1:0]))
+                    || ((wb_addr_count >  1) && (wb_addr_q[1] == ref_idx[ADDR_W-1:0]))
+                    || ((wb_addr_count >  2) && (wb_addr_q[2] == ref_idx[ADDR_W-1:0]));
+        wb_hit_ref_n = ((wb_addr_count != 0) && (wb_addr_q[0] == ref_idx_n[ADDR_W-1:0]))
+                    || ((wb_addr_count >  1) && (wb_addr_q[1] == ref_idx_n[ADDR_W-1:0]))
+                    || ((wb_addr_count >  2) && (wb_addr_q[2] == ref_idx_n[ADDR_W-1:0]));
+        dep_wb_hit   = ((wb_addr_count != 0) && (wb_addr_q[0] == dep_ridx[ADDR_W-1:0]))
+                    || ((wb_addr_count >  1) && (wb_addr_q[1] == dep_ridx[ADDR_W-1:0]))
+                    || ((wb_addr_count >  2) && (wb_addr_q[2] == dep_ridx[ADDR_W-1:0]));
     end
     // NOTE: wb hits are NOT masked by cache hits anywhere — a cache hit is
     // serviced by forwarding (DISPATCH / DREF_SETTLE), never by reading
@@ -222,6 +268,10 @@ module argon2_fill_ctrl #(
     logic [31:0] ag_idx_n;       // u_area_n index: K+1, or K+2 during the latch
     logic [6:0]  ag_rdb;         // addr_gen rd_idx_b: K+1, or K+2 during the latch
     logic [31:0] index_n2;       // K+2 (= index_r + 2)
+    logic [31:0] lane_base;
+    logic [31:0] ref_lane_base, ref_lane_n_base, dep_lane_base;
+    logic [31:0] dep_lane_mod;
+    logic        first_blk_in_lane;
 
     // During the overlap latch the second address port is redirected to
     // block K+2 so the K+2 prefetch can be issued before the drain even
@@ -243,13 +293,16 @@ module argon2_fill_ctrl #(
 
     // Same-lane rule for the dependent early read: in pass 0 / slice 0 the
     // reference lane is forced to the own lane (RFC 9106 §3.3); afterwards it
-    // is J2 % lanes, exactly like the serial path (ref_lane).
+    // is J2 % lanes, exactly like the serial path (ref_lane). Common power-
+    // of-two lane counts stay on lane_mod()'s mask/bit-slice fast path.
     logic dep_same_lane;
     logic [31:0] dep_lane;
+    assign dep_lane_mod  = lane_mod(dep_j1[63:32], lanes);
     assign dep_same_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
-                         ? 1'b1 : ((dep_j1[63:32] % lanes) == lane_id);
+                         ? 1'b1 : (dep_lane_mod == lane_id);
     assign dep_lane = ((pass_r == 32'd0) && (slice_r == 32'd0))
-                    ? lane_id : (dep_j1[63:32] % lanes);
+                    ? lane_id : dep_lane_mod;
+    assign dep_lane_base = lane_offset(dep_lane, lane_length, lanes);
     argon2_ref_area u_area_dep (
         .pass(pass_r), .slice(slice_r), .index(index_n),
         .lane_length(lane_length), .segment_length(segment_length),
@@ -259,7 +312,7 @@ module argon2_fill_ctrl #(
         .j1(dep_j1[31:0]), .ref_area(dep_area), .start_position(dep_spos),
         .lane_length(lane_length), .ref_index(dep_z)
     );
-    assign dep_ridx = dep_lane * lane_length + dep_z;
+    assign dep_ridx = dep_lane_base + dep_z;
     // dep_self: target is the block being written right now (K — its beats
     // are entering the write FIFO this drain and the RAM copy is stale until
     // commit) or the not-yet-computed K+1. dep_wb_hit: target still sits
@@ -282,28 +335,38 @@ module argon2_fill_ctrl #(
         .rd_idx_b(ag_rdb), .rd_j_b(addr_word_n)
     );
 
-    assign segment_length = lane_length / SYNC;
-    assign independent    = (type_i == 2'd1) || (type_i == 2'd2 && pass_r == 32'd0 && slice_r < 32'd2);
-    assign with_xor       = (pass_r != 32'd0);
-    assign curr_idx       = lane_id * lane_length + slice_r * segment_length + index_r;
-    assign prev_idx       = (curr_idx % lane_length == 32'd0) ? (curr_idx + lane_length - 32'd1) : (curr_idx - 32'd1);
+    assign segment_length   = lane_length / SYNC;
+    assign independent      = (type_i == 2'd1) || (type_i == 2'd2 && pass_r == 32'd0 && slice_r < 32'd2);
+    assign with_xor         = (pass_r != 32'd0);
+    assign lane_base        = lane_offset(lane_id, lane_length, lanes);
+    assign first_blk_in_lane = (slice_r == 32'd0) && (index_r == 32'd0);
+    assign curr_idx         = lane_base + slice_r * segment_length + index_r;
+    // prev wraps only on the first block of the lane; expressing that
+    // directly avoids another runtime modulo/divider on the hot path.
+    assign prev_idx         = first_blk_in_lane ? (lane_base + lane_length - 32'd1)
+                                                : (curr_idx - 32'd1);
 
     logic [31:0] next_slice_base, dest_next_addr;
     logic        dest_last_blk;
-    assign next_slice_base = (slice_r == 32'd3) ? (lane_id * lane_length) : (lane_id * lane_length + (slice_r + 32'd1) * segment_length);
+    assign next_slice_base = (slice_r == 32'd3) ? lane_base
+                                                 : (lane_base + (slice_r + 32'd1) * segment_length);
     assign dest_next_addr  = (index_r + 32'd1 < segment_length) ? (curr_idx + 32'd1) : next_slice_base;
     assign dest_last_blk   = (pass_r + 32'd1 == passes) && (slice_r == 32'd3) && (index_r + 32'd1 >= segment_length);
-    assign prev_word0     = prev_q[0][63:0];
-    assign pseudo_rand    = independent ? addr_word : prev_word0;
-    assign j1             = pseudo_rand[31:0];
-    assign ref_lane       = ((pass_r == 32'd0) && (slice_r == 32'd0)) ? lane_id : pseudo_rand[63:32] % lanes;
-    assign same_lane      = (ref_lane == lane_id);
-    assign ref_idx        = ref_lane * lane_length + z;
-    assign index_n        = index_r + 32'd1;
-    assign j1_n           = addr_word_n[31:0];
-    assign ref_lane_n     = ((pass_r == 32'd0) && (slice_r == 32'd0)) ? lane_id : addr_word_n[63:32] % lanes;
-    assign same_lane_n    = (ref_lane_n == lane_id);
-    assign ref_idx_n      = ref_lane_n * lane_length + z_n;
+    assign prev_word0      = prev_q[0][63:0];
+    assign pseudo_rand     = independent ? addr_word : prev_word0;
+    assign j1              = pseudo_rand[31:0];
+    assign ref_lane        = ((pass_r == 32'd0) && (slice_r == 32'd0)) ? lane_id
+                                                                         : lane_mod(pseudo_rand[63:32], lanes);
+    assign ref_lane_base   = lane_offset(ref_lane, lane_length, lanes);
+    assign same_lane       = (ref_lane == lane_id);
+    assign ref_idx         = ref_lane_base + z;
+    assign index_n         = index_r + 32'd1;
+    assign j1_n            = addr_word_n[31:0];
+    assign ref_lane_n      = ((pass_r == 32'd0) && (slice_r == 32'd0)) ? lane_id
+                                                                         : lane_mod(addr_word_n[63:32], lanes);
+    assign ref_lane_n_base = lane_offset(ref_lane_n, lane_length, lanes);
+    assign same_lane_n     = (ref_lane_n == lane_id);
+    assign ref_idx_n       = ref_lane_n_base + z_n;
     // Prefetch safety: the prefetched target's final data must already be
     // committed in memory. That rules out (a) blocks whose write is still in
     // the write FIFO (raw wb hit — NOT masked by a cache hit: nothing ever
@@ -362,11 +425,17 @@ module argon2_fill_ctrl #(
             wb_rptr <= 6'd0;
             wb_count <= 6'd0;
             wb_wbeat <= 5'd0;
+            wb_addr_count <= 2'd0;
+            wb_addr_q[0] <= '0;
+            wb_addr_q[1] <= '0;
+            wb_addr_q[2] <= '0;
         end else begin
-            logic wb_push, wb_pop;
+            logic wb_push, wb_pop, wb_push_first, wb_pop_last;
             logic [5:0] next_count, next_wptr, next_rptr;
             wb_push = (state == WRITE) && c_out_valid && c_out_ready;
             wb_pop  = mem_wr_valid && mem_wr_ready;
+            wb_push_first = wb_push && (wb_wbeat == 5'd0);
+            wb_pop_last   = wb_pop && wb_last[wb_rptr];
 
             next_wptr = wb_wptr;
             next_rptr = wb_rptr;
@@ -392,6 +461,26 @@ module argon2_fill_ctrl #(
             wb_wptr <= next_wptr;
             wb_rptr <= next_rptr;
             wb_count <= next_count;
+
+            case ({wb_pop_last, wb_push_first})
+                2'b01: begin
+                    if (wb_addr_count < WB_ADDR_SLOTS) begin
+                        wb_addr_q[wb_addr_count] <= curr_idx[ADDR_W-1:0];
+                        wb_addr_count <= wb_addr_count + 2'd1;
+                    end
+                end
+                2'b10: begin
+                    if (wb_addr_count > 2'd1) wb_addr_q[0] <= wb_addr_q[1];
+                    if (wb_addr_count > 2'd2) wb_addr_q[1] <= wb_addr_q[2];
+                    wb_addr_count <= wb_addr_count - 2'd1;
+                end
+                2'b11: begin
+                    if (wb_addr_count > 2'd1) wb_addr_q[0] <= wb_addr_q[1];
+                    if (wb_addr_count > 2'd2) wb_addr_q[1] <= wb_addr_q[2];
+                    wb_addr_q[wb_addr_count - 2'd1] <= curr_idx[ADDR_W-1:0];
+                end
+                default: begin end
+            endcase
 
             done <= 1'b0;
             a_init <= 1'b0;
@@ -473,6 +562,10 @@ module argon2_fill_ctrl #(
                         wb_rptr <= 6'd0;
                         wb_count <= 6'd0;
                         wb_wbeat <= 5'd0;
+                        wb_addr_count <= 2'd0;
+                        wb_addr_q[0] <= '0;
+                        wb_addr_q[1] <= '0;
+                        wb_addr_q[2] <= '0;
                         state <= SEG_PREP;
                     end
                 end

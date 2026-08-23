@@ -89,21 +89,28 @@ If a stage still misses after retiming, the lever is the post-add: fold
 `x + y` into the DSP48's C-input adder (C + M·P) rather than a fabric
 chain. This is a synth hint / small `fbla` rewrite, not a latency change.
 
-### 3. Other candidates to watch (no change yet)
+### 3. Other candidates to watch
 
-* **`wb_hit_ref` 32-iteration comb loop** (`argon2_fill_ctrl.sv`): the
-  write-FIFO RAW check OR-reduces 32 address comparisons combinationally
-  into `wb_hit_ref` / `dep_wb_hit`, which gate `mem_rd`. A 32-deep
-  priority-ish reduction is a long path. If it surfaces on the timing
-  report, register the comparison result one cycle early (the FIFO drain
-  is slow enough to absorb it) or narrow the RAW window (the live entries
-  are at most the in-flight 16-beat write, far fewer than 32).
+* **`wb_hit_ref` write-FIFO RAW reduction — narrowed.** The RAW check in
+  `argon2_fill_ctrl.sv` no longer scans all 32 FIFO beats. Because a 32-beat
+  FIFO can contain at most three distinct block addresses (partial head,
+  optional full middle, partial tail), the controller now tracks those block
+  addresses explicitly and compares reads against that 3-entry queue. If this
+  path still shows up after synthesis, the next lever is registering the
+  compare result one cycle early.
 * **`argon2_index` two 32×32 multiplies** (`j1*j1`, `ref_area*j1_sq[63:32]`),
   3 instances = 6 DSPs. Same DSP-register-packing treatment as BlaMka.
-* **`% lanes` on `ref_lane`/`ref_idx`** (`argon2_fill_ctrl`): for p>1 this
-  is another runtime divider; for p=1 (`lanes=1`) it is `%1` and trivial.
-  The p=4 partitioned-memory build should make `lanes` a parameter so the
-  synth emits a `%4` (= mask) instead of a divider.
+* **Lane-select `% lanes` in `argon2_fill_ctrl` — mostly removed.** The
+  hot-path `J2 % lanes` selects (`ref_lane`, `ref_lane_n`, dependent-lane
+  early read) now special-case the common p counts this repo actually builds
+  today — 1/2/4/8/16 lanes — onto masks / bit slices, and the associated
+  `lane * lane_length` offsets now use shift-adds for those same cases, so
+  p=1 and p=4 no longer carry a runtime divider/full-width multiplier
+  there. Odd/non-power-of-two lane counts still fall back to the generic
+  modulo/multiply and remain functionally supported.
+  The first-block `prev_idx` wrap was similarly rewritten from
+  `curr_idx % lane_length == 0` to the direct `(slice==0 && index==0)`
+  predicate.
 * **`argon2_compress` gather muxes**: each P wave reads 16 of 128 64-bit
   block words per instance (N_P=8 ⇒ wide muxing). A big but shallow mux —
   expect routing, not logic, to be the cost; `PBLOCK`/floorplanning if it
@@ -119,7 +126,7 @@ chain. This is a synth hint / small `fbla` rewrite, not a latency change.
    all on `clk_main_a0` (shell-owned), so there are no CDC constraints to
    add.
 2. Read the top negative-slack paths. Expectation: BlaMka mult-add, then
-   `wb_hit_ref` reduction, then addr/`argon2_addr_gen`.
+   addr/`argon2_addr_gen`, then any residual write-FIFO RAW compare logic.
 3. If BlaMka misses, fold `x+y` into the DSP48 C-adder (Step 2 above).
 4. Re-run the perf bench at `PERF_MHZ=250` against the post-route
    frequency (if the tool reports e.g. 240 MHz, set `PERF_MHZ=240` and
