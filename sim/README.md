@@ -9,6 +9,26 @@ make -C sim                     # Icarus Verilog (default)
 make -C sim SIM=verilator       # Verilator
 ```
 
+If you do not have a system Verilator installed, the repo ships a helper for
+using the PyPI wheel in a virtualenv:
+
+```bash
+./scripts/setup_verilator.sh --install
+./scripts/setup_verilator.sh --run make -C sim SIM=verilator NP=8 fill
+./scripts/setup_verilator.sh --run make -C sim SIM=verilator NP=8 perf PERF_NP=8
+make sim-verilator                     # top-level convenience target
+make sim-verilator-np8                 # same, but with NP=8
+make perf-verilator                    # top-level perf convenience target
+make perf-verilator-np8                # same perf bench with PERF_NP=8
+```
+
+Or, if you prefer to export the environment once for a shell session:
+
+```bash
+eval "$(./scripts/setup_verilator.sh --print-env)"
+make -C sim SIM=verilator NP=8 sweep
+```
+
 Individual benches:
 
 ```

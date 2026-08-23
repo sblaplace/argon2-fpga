@@ -157,10 +157,12 @@ tests/                unittest against RFC 9106 §5
 ```
 make test                              # RFC 7693 + RFC 9106 §5, no simulator needed
 make -C sim                            # Icarus self-checks (needs iverilog)
-make -C sim SIM=verilator              # same benches on Verilator
+make sim-verilator                     # same benches on Verilator via the PyPI/system helper
 make -C sim SIM=verilator NP=8 sweep   # m'16-128 x t1-3 x i/d/id AXI KAT sweep
 make sim-np8                           # full sim suite at the N_P=8 performance point
-make -C sim SIM=verilator NP=8 perf    # cand/s vs. DDR4 timing model
+make sim-verilator-np8                 # same full suite at N_P=8 on Verilator
+make perf-verilator                    # DDR4 perf bench on Verilator (default PERF_NP=1)
+make perf-verilator-np8                # DDR4 perf bench on Verilator at PERF_NP=8
 ./fpga/f1/build.sh sim --np 8          # 4-channel CL bench at the same N_P=8 point
 ./fpga/f1/build.sh emit-top --np 8     # generate a self-contained HDK top wrapper
 ```
