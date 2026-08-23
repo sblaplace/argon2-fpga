@@ -1,4 +1,6 @@
-.PHONY: test vectors sim sim-np8 clean
+VERILATOR_SETUP ?= ./scripts/setup_verilator.sh
+
+.PHONY: test vectors sim sim-np8 sim-verilator sim-verilator-np8 clean
 
 test:
 	python3 -m unittest discover -s tests -v
@@ -11,6 +13,12 @@ sim:
 
 sim-np8:
 	$(MAKE) -C sim NP=8
+
+sim-verilator:
+	$(VERILATOR_SETUP) --run $(MAKE) -C sim SIM=verilator
+
+sim-verilator-np8:
+	$(VERILATOR_SETUP) --run $(MAKE) -C sim SIM=verilator NP=8
 
 clean:
 	$(MAKE) -C sim clean

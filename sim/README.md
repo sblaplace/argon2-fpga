@@ -16,6 +16,8 @@ using the PyPI wheel in a virtualenv:
 ./scripts/setup_verilator.sh --install
 ./scripts/setup_verilator.sh --run make -C sim SIM=verilator NP=8 fill
 ./scripts/setup_verilator.sh --run make -C sim SIM=verilator NP=8 perf PERF_NP=8
+make sim-verilator                     # top-level convenience target
+make sim-verilator-np8                # same, but with NP=8
 ```
 
 Or, if you prefer to export the environment once for a shell session:

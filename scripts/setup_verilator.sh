@@ -85,9 +85,19 @@ print(os.path.dirname(verilator.__file__))
 PY
 }
 
-ensure_verilator
-VERILATOR_BIN="$VENV_DIR/bin/verilator-cli"
-VERILATOR_ROOT_DIR="$(verilator_root)"
+case "$MODE" in
+    install|print-env|run)
+        ensure_verilator
+        VERILATOR_BIN="$VENV_DIR/bin/verilator-cli"
+        VERILATOR_ROOT_DIR="$(verilator_root)"
+        ;;
+    help)
+        ;;
+    *)
+        echo "error: unhandled mode: $MODE" >&2
+        exit 2
+        ;;
+esac
 
 case "$MODE" in
     install)
