@@ -17,6 +17,8 @@ make -C sim blamka     # BlaMka GB
 make -C sim index      # index_alpha
 make -C sim compress   # compression G (incl. dest-xor)
 make -C sim addr       # argon2i address window
+make -C sim p4        # partitioned-memory p=4 KAT (xbar + 4 memories)
+make -C sim p4perf    # 1x p=4 across four DDR4-2400 channel models
 make -C sim fill       # 8 KiB p=1 fill KAT (i / d / id)
 make -C sim rfc        # RFC 9106 §5 32 KiB / p=4 fill (i / d / id)
 make -C sim axi        # 8 KiB fill through the AXI4-MM adapter
@@ -43,6 +45,8 @@ Current status — all eight pass on both back ends:
 | `tb_argon2_addr_gen` | 128-address argon2i window in counter mode |
 | `tb_argon2_fill` | t=2 / m=8 KiB / p=1 fill, argon2i + d + id |
 | `tb_argon2_fill_rfc` | RFC 9106 §5: t=3 / m=32 KiB / p=4, slice barrier |
+| `tb_argon2_p4` | p=4 through `argon2_mem_xbar` + four local memories: RFC §5 + m'∈{64,128} sweep + non-pow2 m'=48, i/d/id |
+| `tb_p4_perf` | 1×p=4 across 4 independent DDR4-2400 models (cand/s, per-channel GB/s, xbar contention, barrier skew) |
 | `tb_argon2_axi` | 8 KiB fill through `argon2_fill_axi` + AXI slave |
 
 `tb_argon2_fill` compares the whole 8 KiB working set against `ref/`

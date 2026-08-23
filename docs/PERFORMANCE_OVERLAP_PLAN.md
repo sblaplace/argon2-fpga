@@ -52,7 +52,8 @@ sketched:
   commits on this and never went green), the risk/reward is poor. The
   higher-value levers are the 250 MHz CL clock (helps *all* types,
   +~25%, bounded by the 250 MHz AXI ceiling ~1.33) and the
-  partitioned-memory p=4 crossbar.
+  partitioned-memory p=4 crossbar (**landed 2026-08-22**: `argon2_mem_xbar`
+  + `tb_argon2_p4` KAT + `tb_p4_perf` — see `docs/PERFORMANCE.md`).
 
 Landing the sweep also exposed and fixed two latent correctness bugs (the
 `u_area_dep` `same_lane` input was never connected; the write-FIFO RAW

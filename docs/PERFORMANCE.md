@@ -289,7 +289,97 @@ write handshakes.
    * `done` was an unlatched 1-cycle pulse in STATUS; a host polling
      over PCIe could never see it. Now latched until the next start.
 
-## Remaining headroom (in rough order)
+## Partitioned-memory p=4: the read crossbar (`argon2_mem_xbar`)
+
+The last piece the partitioned floorplan was missing (previously: "the RFC
+p=4 bench uses shared memory and does not model cross-channel routing").
+`argon2_mem_xbar` sits between `argon2_fill_job` (4 fill controllers, one
+per lane) and four single-outstanding memory ports (`argon2_axi_mm` + one
+DDR4 channel each):
+
+* **Reads** carry the controller's `mem_rd_owner` hint (the reference LANE,
+  known at issue time) and are routed to the owning channel with a
+  global→local index translation (`addr − owner*lane_length`, a per-channel
+  shift-add — no runtime division, no power-of-two assumption on
+  `lane_length`, per the 250 MHz closure rule). Responses are tag-routed
+  back to the requesting lane; per-channel round-robin, so no lane starves
+  behind the others' remote references.
+* **Writes** pass through 1:1: a lane only ever writes its own region.
+* **No producer-side hazard logic is needed**: cross-lane references only
+  target the reference lane's *completed* slices (`argon2_ref_area`:
+  pass>0/!same_lane → `lane_length − segment_length`, i.e. everything but
+  the current slice; pass 0 → completed slices only), and each lane drains
+  its write FIFO before the slice barrier. Own-lane recency hazards stay
+  in the fill controller.
+
+**Lane-port contract** (what the fill controller was designed against, and
+what the crossbar must reproduce): a request is accepted the cycle the lane
+is drained (the single-RAM "free" semantics), a lane never sees two
+responses interleaved (a queued request waits until the lane's previous
+burst — including a deliberately *abandoned* dependent read — fully
+drains), and beats only start ≥1 cycle after command acceptance.
+
+### Two latent `argon2_fill_ctrl` hazards found and fixed
+
+Wiring the router in exposed that several fill-controller states (DISPATCH,
+DREF_SETTLE, COLLECT_REF/PREV) *pre-placed* read requests on the port at
+the moment of jumping into an `ISSUE_*` state, without checking
+`mem_rd_valid` — so they could **overwrite a still-pending hook-issued
+request** (early dest / dependent ref / K+2 prefetch) and leave its
+collector armed to eat the replacement request's response (observed as
+`dest == ref` inputs). With a direct RAM the pending window was ~1 cycle,
+so main was green *by pacing luck* (fragile at N_P=8 even without the
+router). Fix: request placement moved **into** the `ISSUE_REF/PREV/DEST`
+states, gated on the port being free; hooks keep their `!mem_rd_valid`
+gating. The whole KAT suite (fill, rfc, p4, axi, axibig, sweep, cl,
+discipline — at N_P=1 and N_P=8) stayed green through the change.
+
+### Correctness coverage: `tb_argon2_p4`
+
+Four controllers + crossbar + **four separate local-addressed memories**;
+per-job full-matrix compare against `ref/`. 16 jobs, all passing at both
+N_P=1 and N_P=8 (Verilator; iverilog via CI):
+
+* RFC 9106 §5 official vector (m=32 KiB, p=4, t=3) — argon2i/d/id;
+* geometry sweep m' ∈ {64, 128} × t ∈ {1, 3} × i/d/id (lane_length 16/32,
+  segment_length 4/8 — scales the shared-RAM RFC bench never covered);
+* m'=48, t=2, argon2id — lane_length 12, **not a power of two**.
+
+### Measured: `tb_p4_perf` (1×p=4 across four independent DDR4-2400 channels)
+
+N_P=8, 200 MHz, m'=16 MiB (4 MiB/channel), t=3, preload with
+pseudo-random data (zeroed memory collapses argon2d's data-dependent
+reference lane onto lane 0 — pass 0's J2 comes from the initial blocks;
+from pass 1 it is computed output, i.e. avalanche-random):
+
+| Type     | 1×p=4 cand/s (4 ch) | cyc/blk (candidate-wide) | 4×p=1 aggregate\* | Efficiency | 250 MHz p=4 |
+|----------|--------------------:|-------------------------:|------------------:|-----------:|------------:|
+| argon2i  | 3.018               | 21.1                     | 4.05              | 75%       | —           |
+| argon2d  | 2.925               | 21.7                     | 4.03              | 73%       | —           |
+| argon2id | 3.005               | 21.2                     | 4.19              | 72%       | 3.399       |
+
+\* per-lane `tb_perf` at m'=16 MiB × 4 (i 1.013 / d 1.007 / id 1.049).
+
+Per-channel load matches the model (~2 reads + 1 write per own-lane block,
+~20.5k read bursts/channel, ~4 GB/s read + 2.4 GB/s write each), and the
+slice-barrier skew is small (≤3.4%, worst lane). The gap to 4×p=1 is
+**crossbar contention**: each channel serializes up to 4 lanes' remote
+reads behind its own (single outstanding read per channel, matching
+`argon2_axi_mm`), and lanes spend ~42% of their cycles waiting for a grant
+— hidden behind compute for throughput, but the reason p=4 lands at
+~73% of the p=1 aggregate rather than ~100%. Closing it needs multiple
+outstanding reads per channel (an `argon2_axi_mm` with 2 ARIDs + RID
+routing in the crossbar), which the single-R-channel experiment below says
+is only worth it if the *data* beats can interleave — i.e. per-lane
+outstanding tags on one channel, not just multiple ARIDs.
+
+Bottom line: a defender-specified p=4 parameter now runs at ~3.0 cand/s on
+an f1.2xlarge-class 4-channel box (vs ~4.1 for 4×p=1) — and a single
+p=4 candidate gets 4× the per-candidate latency advantage, since all four
+channels work on it at once. Build/run: `make -C sim p4perf` (`P4_TYPE`,
+`P4_BLKS`, `P4_NP`, `P4_MHZ`; `p4` for the KAT bench).
+
+
 
 * **250 MHz CL clock** (the F1 shell runs sh_ddr at 250 MHz in the
   reference designs): **measured** with the new clock-parameterized perf
@@ -320,12 +410,13 @@ write handshakes.
 * **Deeper P retiming** (the 2-wave × ~9-cycle P chain is the hard
   floor; 16 P units instead of 8 does not help — the column wave reads
   the row wave's output).
-* **Partitioned-memory p=4 routing:** Argon2 references blocks in other
-  lanes, so banking one lane per channel needs an owner-channel read crossbar
-  and tagged return path; the slice barrier alone is insufficient. The RFC
-  p=4 bench currently uses a shared simulation RAM and does not model this.
-  Build the router and a four-memory p=4 perf bench before any hardware
-  4×p=1 versus 1×p=4 comparison.
+* **Partitioned-memory p=4 routing: DONE (simulation)** — `argon2_mem_xbar`
+  routes cross-lane reference reads to the owning channel and tag-returns
+  the beats; RFC §5 + geometry KATs at N_P=1/8 and a four-DDR4-channel perf
+  bench all land (see "Partitioned-memory p=4" above). Remaining: wire it
+  into the F1 CL + host API (the CL currently runs four independent p=1
+  jobs), and consider multi-outstanding reads per channel to cut the ~27%
+  contention gap to 4×p=1.
 
 
 ## Rejected: second outstanding read for the argon2d dependent ref
