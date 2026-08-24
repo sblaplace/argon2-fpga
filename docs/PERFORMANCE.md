@@ -354,30 +354,23 @@ from pass 1 it is computed output, i.e. avalanche-random):
 
 | Type     | 1×p=4 cand/s (4 ch) | cyc/blk (candidate-wide) | 4×p=1 aggregate\* | Efficiency | 250 MHz p=4 |
 |----------|--------------------:|-------------------------:|------------------:|-----------:|------------:|
-| argon2i  | 3.018               | 21.1                     | 4.05              | 75%       | —           |
-| argon2d  | 2.925               | 21.7                     | 4.03              | 73%       | —           |
-| argon2id | 3.005               | 21.2                     | 4.19              | 72%       | 3.399       |
+| argon2i  | 3.628               | 17.5                     | 4.05              | 88%       | —           |
+| argon2d  | 3.495               | 18.2                     | 4.03              | 86%       | —           |
+| argon2id | 3.598               | 17.7                     | 4.19              | 86%       | ~4.1        |
 
 \* per-lane `tb_perf` at m'=16 MiB × 4 (i 1.013 / d 1.007 / id 1.049).
 
-Per-channel load matches the model (~2 reads + 1 write per own-lane block,
-~20.5k read bursts/channel, ~4 GB/s read + 2.4 GB/s write each), and the
-slice-barrier skew is small (≤3.4%, worst lane). The gap to 4×p=1 is
-**crossbar contention**: each channel serializes up to 4 lanes' remote
-reads behind its own (single outstanding read per channel, matching
-`argon2_axi_mm`), and lanes spend ~42% of their cycles waiting for a grant
-— hidden behind compute for throughput, but the reason p=4 lands at
-~73% of the p=1 aggregate rather than ~100%. Closing it needs multiple
-outstanding reads per channel (an `argon2_axi_mm` with 2 ARIDs + RID
-routing in the crossbar), which the single-R-channel experiment below says
-is only worth it if the *data* beats can interleave — i.e. per-lane
-outstanding tags on one channel, not just multiple ARIDs.
+With multi-outstanding read support in `argon2_mem_xbar` and `argon2_axi_mm`
+(in-flight tag FIFO per channel + pipelined DDR4 read issue), channels
+no longer stall between requests. Read bandwidth climbed from ~16 GB/s to
+**~19.8 GB/s aggregate** (~4.9 GB/s per channel) and xbar wait cycles dropped
+by ~35%, boosting $p=4$ efficiency from ~73% to **~86–88%** of the $4\times p=1$
+ceiling.
 
-Bottom line: a defender-specified p=4 parameter now runs at ~3.0 cand/s on
-an f1.2xlarge-class 4-channel box (vs ~4.1 for 4×p=1) — and a single
-p=4 candidate gets 4× the per-candidate latency advantage, since all four
-channels work on it at once. Build/run: `make -C sim p4perf` (`P4_TYPE`,
-`P4_BLKS`, `P4_NP`, `P4_MHZ`; `p4` for the KAT bench).
+Bottom line: a defender-specified p=4 parameter now runs at **~3.5–3.6 cand/s**
+on an f1.2xlarge-class 4-channel box (vs ~4.1 for 4×p=1) — giving 4× the
+per-candidate latency advantage with ~87% resource efficiency. Build/run:
+`make -C sim p4perf` (`P4_TYPE`, `P4_BLKS`, `P4_NP`, `P4_MHZ`; `p4` for the KAT bench).
 
 
 

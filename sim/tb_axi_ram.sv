@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// AXI4-MM slave used by tb_argon2_axi. 512-bit beats, 16-beat bursts,
-// programmable read latency. AW is held off one cycle and WREADY
-// toggles so the adapter's backpressure paths actually fire.
+// AXI4-MM slave used by tb_argon2_axi and tb_cl_argon2. 512-bit beats,
+// 16-beat bursts, programmable read latency, supports pipelined AR queue.
 `timescale 1ns / 1ps
 
 module tb_axi_ram #(
@@ -46,15 +45,19 @@ module tb_axi_ram #(
     input  logic                    s_axi_rready
 );
     localparam int NBEAT = 16;
+    localparam int AR_DEPTH = 4;
 
     logic [DATA_W-1:0] mem [0:NBLK*NBEAT-1];
 
-    logic        rd_busy;
-    logic [31:0] rd_idx;
+    logic [31:0]     ar_q_idx  [0:AR_DEPTH-1];
+    logic [7:0]      ar_q_len  [0:AR_DEPTH-1];
+    logic [ID_W-1:0] ar_q_id   [0:AR_DEPTH-1];
+    logic [1:0]      ar_wr_ptr, ar_rd_ptr;
+    logic [2:0]      ar_cnt;
+
+    logic        rd_active;
     logic [4:0]  rd_beat;
     logic [7:0]  rd_wait;
-    logic [7:0]  rd_len;
-    logic [ID_W-1:0] rd_id;
 
     logic        wr_have;
     logic        aw_seen;
@@ -66,9 +69,10 @@ module tb_axi_ram #(
     assign s_axi_bresp = 2'b00;
     assign s_axi_rresp = 2'b00;
 
+    assign s_axi_arready = (ar_cnt < 3'(AR_DEPTH));
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            s_axi_arready <= 1'b1;
             s_axi_awready <= 1'b0;
             s_axi_wready  <= 1'b0;
             s_axi_rvalid  <= 1'b0;
@@ -77,49 +81,74 @@ module tb_axi_ram #(
             s_axi_rid     <= '0;
             s_axi_bvalid  <= 1'b0;
             s_axi_bid     <= '0;
-            rd_busy       <= 1'b0;
-            rd_idx        <= 32'd0;
+            ar_wr_ptr     <= 2'd0;
+            ar_rd_ptr     <= 2'd0;
+            ar_cnt        <= 3'd0;
+            rd_active     <= 1'b0;
             rd_beat       <= 5'd0;
             rd_wait       <= 8'd0;
-            rd_len        <= 8'd0;
-            rd_id         <= '0;
             wr_have       <= 1'b0;
             aw_seen       <= 1'b0;
             wr_idx        <= 32'd0;
             wr_beat       <= 5'd0;
             wr_id         <= '0;
             w_gate        <= 1'b1;
+            for (int i = 0; i < AR_DEPTH; i++) begin
+                ar_q_idx[i] <= '0;
+                ar_q_len[i] <= '0;
+                ar_q_id[i]  <= '0;
+            end
         end else begin
+            logic ar_in, rd_finish;
+            ar_in = s_axi_arvalid && s_axi_arready;
+            rd_finish = 1'b0;
+
             s_axi_rvalid <= 1'b0;
             s_axi_rlast  <= 1'b0;
             w_gate       <= ~w_gate;
 
-            // Read address: accept when idle.
-            s_axi_arready <= !rd_busy;
-            if (!rd_busy && s_axi_arvalid && s_axi_arready) begin
-                rd_idx  <= s_axi_araddr[31:6];
-                rd_len  <= s_axi_arlen;
-                rd_beat <= 5'd0;
-                rd_wait <= RD_LAT[7:0];
-                rd_id   <= s_axi_arid;
-                rd_busy <= 1'b1;
-                s_axi_arready <= 1'b0;
-            end else if (rd_busy && rd_wait != 8'd0) begin
+            // Enqueue incoming AR
+            if (ar_in) begin
+                ar_q_idx[ar_wr_ptr] <= s_axi_araddr[31:6];
+                ar_q_len[ar_wr_ptr] <= s_axi_arlen;
+                ar_q_id[ar_wr_ptr]  <= s_axi_arid;
+                ar_wr_ptr <= ar_wr_ptr + 2'd1;
+            end
+
+            // Read pipeline execution
+            if (!rd_active) begin
+                if (ar_cnt != 3'd0 || ar_in) begin
+                    rd_active <= 1'b1;
+                    rd_wait   <= RD_LAT[7:0];
+                    rd_beat   <= 5'd0;
+                end
+            end else if (rd_wait != 8'd0) begin
                 rd_wait <= rd_wait - 8'd1;
-            end else if (rd_busy) begin
+            end else begin
                 s_axi_rvalid <= 1'b1;
-                s_axi_rdata  <= mem[rd_idx + 32'(rd_beat)];
-                s_axi_rid    <= rd_id;
-                s_axi_rlast  <= (rd_beat == 5'(rd_len));
+                s_axi_rdata  <= mem[ar_q_idx[ar_rd_ptr] + 32'(rd_beat)];
+                s_axi_rid    <= ar_q_id[ar_rd_ptr];
+                s_axi_rlast  <= (rd_beat == 5'(ar_q_len[ar_rd_ptr]));
                 if (s_axi_rready) begin
-                    if (rd_beat == 5'(rd_len))
-                        rd_busy <= 1'b0;
-                    else
+                    if (rd_beat == 5'(ar_q_len[ar_rd_ptr])) begin
+                        rd_finish = 1'b1;
+                        ar_rd_ptr <= ar_rd_ptr + 2'd1;
+                        if ((ar_cnt + (ar_in ? 3'd1 : 3'd0) - 3'd1) != 3'd0) begin
+                            rd_active <= 1'b1;
+                            rd_wait   <= RD_LAT[7:0];
+                            rd_beat   <= 5'd0;
+                        end else begin
+                            rd_active <= 1'b0;
+                        end
+                    end else begin
                         rd_beat <= rd_beat + 5'd1;
+                    end
                 end
             end
 
-            // Write address: drop ready for one cycle after awvalid rises.
+            ar_cnt <= ar_cnt + (ar_in ? 3'd1 : 3'd0) - (rd_finish ? 3'd1 : 3'd0);
+
+            // Write address
             if (!wr_have && !s_axi_bvalid) begin
                 if (s_axi_awvalid && !aw_seen) begin
                     aw_seen       <= 1'b1;

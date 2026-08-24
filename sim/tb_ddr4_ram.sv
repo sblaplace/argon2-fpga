@@ -12,14 +12,9 @@
 //   tRFC = 350 ns -> 70 cyc refresh
 //   tREFI = 7.8 us -> 1560 cyc between refreshes
 //
-// The model is a single-command shared port: at most one request executes
-// at a time (realistic for a one-outstanding-read core). Read beats stream
-// 1/cycle once the latency elapses; the 512-bit AXI bus at 200 MHz
-// (12.8 GB/s) is slower than the DIMM (19.2 GB/s), so no tCCD modeling is
-// needed. Writes are captured immediately (the core sends at most one
-// burst at a time and waits for B before the next AW), executed on the
-// port when free, and BVALID is returned only after the write commits —
-// exactly what the adapter's wr_b_wait stalls on.
+// Supports pipelined read command queueing (up to 4 in-flight AR requests).
+// Writes are captured immediately, executed on the port when free, and
+// BVALID is returned only after the write commits.
 //
 // Exposed counters let a perf bench report utilization and traffic.
 
@@ -92,6 +87,7 @@ module tb_ddr4_ram #(
     localparam int NBEAT  = 16;
     localparam int ROW_W  = ADDR_W - 14;         // row = addr >> 14
     localparam int NBFIFO = NBLK * NBEAT;        // beats of storage
+    localparam int AR_Q_DEPTH = 4;
 
     logic [DATA_W-1:0] mem [0:NBFIFO-1];
 
@@ -108,14 +104,20 @@ module tb_ddr4_ram #(
     logic [15:0] refresh_cnt;
     logic        refresh_due;
 
-    // ---- read capture -----------------------------------------------------
-    logic              rd_active;    // AR accepted, burst not finished
-    logic              rd_stream;    // R beats flowing now
-    logic [ADDR_W-1:0] rd_addr;
-    logic [4:0]        rd_beat;
-    logic [ID_W-1:0]   rd_id;
+    // ---- read capture & in-flight pipeline -------------------------------
+    logic [ADDR_W-1:0] ar_q_addr [0:AR_Q_DEPTH-1];
+    logic [ID_W-1:0]   ar_q_id   [0:AR_Q_DEPTH-1];
+    logic [1:0]        ar_wr_ptr;
+    logic [1:0]        ar_exec_ptr;
+    logic [1:0]        ar_stream_ptr;
+    logic [2:0]        ar_cnt;
+    logic [2:0]        ar_pend_exec;
+    logic [2:0]        ar_pend_stream;
 
-    // ---- write capture ------------------------------------------------------
+    logic              rd_stream;    // R beats flowing now
+    logic [4:0]        rd_beat;
+
+    // ---- write capture ---------------------------------------------------
     logic              aw_captured;  // AW accepted, W beats arriving
     logic              wb_done;      // full W burst in, awaiting port + B
     logic              b_pending;    // port executed; BVALID held
@@ -127,13 +129,13 @@ module tb_ddr4_ram #(
     assign s_axi_bresp = 2'b00;
     assign s_axi_rresp = 2'b00;
 
-    // R beats flow only while the port is streaming a granted read.
+    assign rd_stream    = (ar_pend_stream != 3'd0);
     assign s_axi_rvalid = rd_stream;
     assign s_axi_rlast  = (rd_beat == 5'd15);
-    assign s_axi_rdata  = mem[rd_addr[31:6] + 32'(rd_beat)];
-    assign s_axi_rid    = rd_id;
+    assign s_axi_rdata  = mem[ar_q_addr[ar_stream_ptr][31:6] + 32'(rd_beat)];
+    assign s_axi_rid    = ar_q_id[ar_stream_ptr];
 
-    assign s_axi_arready = !rd_active;
+    assign s_axi_arready = (ar_cnt < 3'(AR_Q_DEPTH));
     assign s_axi_awready = !aw_captured;
     assign s_axi_wready  = aw_captured;
     assign s_axi_bvalid  = b_pending;
@@ -173,23 +175,25 @@ module tb_ddr4_ram #(
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            pstate      <= P_IDLE;
-            pcnt        <= 8'd0;
-            last_was_wr <= 1'b0;
-            refresh_cnt <= T_REFI_C[15:0];
-            refresh_due <= 1'b0;
-            rd_active   <= 1'b0;
-            rd_stream   <= 1'b0;
-            rd_addr     <= '0;
-            rd_beat     <= 5'd0;
-            rd_id       <= '0;
-            aw_captured <= 1'b0;
-            wb_done     <= 1'b0;
-            b_pending   <= 1'b0;
-            wr_addr     <= '0;
-            wr_beat     <= 5'd0;
-            wr_id       <= '0;
-            wr_starve   <= 16'd0;
+            pstate         <= P_IDLE;
+            pcnt           <= 8'd0;
+            last_was_wr    <= 1'b0;
+            refresh_cnt    <= T_REFI_C[15:0];
+            refresh_due    <= 1'b0;
+            ar_wr_ptr      <= 2'd0;
+            ar_exec_ptr    <= 2'd0;
+            ar_stream_ptr  <= 2'd0;
+            ar_cnt         <= 3'd0;
+            ar_pend_exec   <= 3'd0;
+            ar_pend_stream <= 3'd0;
+            rd_beat        <= 5'd0;
+            aw_captured    <= 1'b0;
+            wb_done        <= 1'b0;
+            b_pending      <= 1'b0;
+            wr_addr        <= '0;
+            wr_beat        <= 5'd0;
+            wr_id          <= '0;
+            wr_starve      <= 16'd0;
             for (int i = 0; i < 16; i = i + 1) begin
                 open_row[i] <= '0;
             end
@@ -201,14 +205,23 @@ module tb_ddr4_ram #(
             st_wr_beats  <= 64'd0;
             st_rd_req    <= 64'd0;
             st_wr_req    <= 64'd0;
+            for (int i = 0; i < AR_Q_DEPTH; i++) begin
+                ar_q_addr[i] <= '0;
+                ar_q_id[i]   <= '0;
+            end
         end else begin
+            logic ar_in, exec_start, exec_done, stream_beat, stream_done;
+
+            ar_in = s_axi_arvalid && s_axi_arready;
+            stream_beat = rd_stream && s_axi_rvalid && s_axi_rready;
+            stream_done = stream_beat && (rd_beat == 5'd15);
+            exec_start = 1'b0;
+            exec_done = 1'b0;
+
             st_cycles <= st_cycles + 64'd1;
             if (pstate != P_IDLE) st_port_busy <= st_port_busy + 64'd1;
 
-            // Assert refresh_due on the transition to zero; it is cleared
-            // when the port grants the refresh. While the counter sits at
-            // zero (during P_REF) refresh_due stays deasserted, so a
-            // single refresh is served per tREFI window.
+            // Assert refresh_due on transition to zero
             if (refresh_cnt == 16'd1) begin
                 refresh_cnt <= 16'd0;
                 refresh_due <= 1'b1;
@@ -216,18 +229,20 @@ module tb_ddr4_ram #(
                 refresh_cnt <= refresh_cnt - 16'd1;
             end
 
-            // ---- read capture ------------------------------------------
-            if (!rd_active && s_axi_arvalid && s_axi_arready) begin
-                rd_active <= 1'b1;
-                rd_addr   <= s_axi_araddr;
-                rd_id     <= s_axi_arid;
-                rd_beat   <= 5'd0;
+            // ---- read AR capture ---------------------------------------
+            if (ar_in) begin
+                ar_q_addr[ar_wr_ptr] <= s_axi_araddr;
+                ar_q_id[ar_wr_ptr]   <= s_axi_arid;
+                ar_wr_ptr <= ar_wr_ptr + 2'd1;
                 st_rd_req <= st_rd_req + 64'd1;
-            end else if (rd_stream && s_axi_rvalid && s_axi_rready) begin
+            end
+
+            // ---- read data streaming -----------------------------------
+            if (stream_beat) begin
                 st_rd_beats <= st_rd_beats + 64'd1;
                 if (rd_beat == 5'd15) begin
-                    rd_stream <= 1'b0;
-                    rd_active <= 1'b0;
+                    rd_beat <= 5'd0;
+                    ar_stream_ptr <= ar_stream_ptr + 2'd1;
                 end else begin
                     rd_beat <= rd_beat + 5'd1;
                 end
@@ -265,14 +280,15 @@ module tb_ddr4_ram #(
                         pstate      <= P_REF;
                         pcnt        <= T_RFC_C[7:0] + (rd_stream ? 8'(16 - rd_beat) : 8'd0);
                         refresh_due <= 1'b0;
-                    end else if (rd_active && !rd_stream &&
+                    end else if (ar_pend_exec != 3'd0 &&
                                  !(wb_done && wr_starve >= WR_STARVE[15:0])) begin
+                        exec_start  = 1'b1;
                         pstate      <= P_RD;
-                        pcnt        <= rd_latency(rd_addr);
+                        pcnt        <= rd_latency(ar_q_addr[ar_exec_ptr]);
                         last_was_wr <= 1'b0;
-                        // open the row now (command issue)
-                        row_valid[rd_addr[13:10]] <= 1'b1;
-                        open_row [rd_addr[13:10]] <= rd_addr[ADDR_W-1:14];
+                        row_valid[ar_q_addr[ar_exec_ptr][13:10]] <= 1'b1;
+                        open_row [ar_q_addr[ar_exec_ptr][13:10]] <= ar_q_addr[ar_exec_ptr][ADDR_W-1:14];
+                        ar_exec_ptr <= ar_exec_ptr + 2'd1;
                     end else if (wb_done) begin
                         pstate      <= P_WR;
                         pcnt        <= wr_latency(wr_addr) + (rd_stream ? 8'(16 - rd_beat) : 8'd0);
@@ -290,8 +306,7 @@ module tb_ddr4_ram #(
                     if (pcnt != 8'd0) begin
                         pcnt <= pcnt - 8'd1;
                     end else begin
-                        // stream 16 beats, then idle
-                        rd_stream <= 1'b1;
+                        exec_done = 1'b1;
                         pstate    <= P_IDLE;
                     end
                 end
@@ -317,6 +332,11 @@ module tb_ddr4_ram #(
 
                 default: pstate <= P_IDLE;
             endcase
+
+            // Pipeline tracking updates
+            ar_cnt         <= ar_cnt + (ar_in ? 3'd1 : 3'd0) - (stream_done ? 3'd1 : 3'd0);
+            ar_pend_exec   <= ar_pend_exec + (ar_in ? 3'd1 : 3'd0) - (exec_start ? 3'd1 : 3'd0);
+            ar_pend_stream <= ar_pend_stream + (exec_done ? 3'd1 : 3'd0) - (stream_done ? 3'd1 : 3'd0);
         end
     end
 endmodule
