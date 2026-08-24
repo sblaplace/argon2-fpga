@@ -3,6 +3,13 @@
 Compression G uses BlaMka, *not* stock BLAKE2b. H / H' use BLAKE2b.
 Indexing matches the PHC reference (phc-winner-argon2), which is the
 unambiguous reading of RFC 9106 §3.4.
+
+This module now has two layers:
+- Pure-Python reference (slow, always correct)
+- Optional fast path via hashlib (for BLAKE2b) and numba+numpy (for G and fill)
+
+The fast path is used automatically when those packages are available;
+otherwise the pure implementation is used. Tests compare both.
 """
 
 from __future__ import annotations
@@ -23,6 +30,10 @@ class Type(IntEnum):
     I = 1
     ID = 2
 
+
+# ---------------------------------------------------------------------------
+# Pure-Python reference (slow)
+# ---------------------------------------------------------------------------
 
 def _fbla(a: int, b: int) -> int:
     """a + b + 2 * trunc32(a) * trunc32(b)  (mod 2^64)."""
@@ -53,18 +64,16 @@ def argon2_p(v: list[int]) -> None:
     blamka_g(v, 3, 4, 9, 14)
 
 
-def compress_g(x: list[int], y: list[int], with_xor: list[int] | None = None) -> list[int]:
-    """G(X, Y) = P_cols(P_rows(X ⊕ Y)) ⊕ (X ⊕ Y)  [⊕ dest if with_xor]."""
+def _compress_g_pure(x: list[int], y: list[int], with_xor: list[int] | None = None) -> list[int]:
+    """G(X, Y) = P_cols(P_rows(X ⊕ Y)) ⊕ (X ⊕ Y)  [⊕ dest if with_xor]. Pure."""
     r = [(x[i] ^ y[i]) & MASK64 for i in range(BLOCK_WORDS)]
-    tmp = r[:]  # saved R, optionally XORed with destination (v1.3 later passes)
+    tmp = r[:]
 
-    # Rows: 8 groups of 16 consecutive 64-bit words.
     for i in range(8):
         row = r[16 * i : 16 * i + 16]
         argon2_p(row)
         r[16 * i : 16 * i + 16] = row
 
-    # Columns: 8 groups taking the i-th 16-byte register of each row.
     for i in range(8):
         col = [
             r[2 * i],
@@ -114,7 +123,7 @@ def _le32(n: int) -> bytes:
 
 
 def h_prime(data: bytes, out_len: int) -> bytes:
-    """Variable-length hash H' (RFC 9106 §3.3)."""
+    """Variable-length hash H' (RFC 9106 §3.3). Uses fast blake2b via hashlib."""
     if out_len <= 64:
         return blake2b(_le32(out_len) + data, digest_size=out_len)
     r = ((out_len + 31) // 32) - 2
@@ -128,12 +137,44 @@ def h_prime(data: bytes, out_len: int) -> bytes:
     return bytes(out)
 
 
-def _words_from_bytes(buf: bytes) -> list[int]:
+def _words_from_bytes_pure(buf: bytes) -> list[int]:
     return [int.from_bytes(buf[i : i + 8], "little") for i in range(0, len(buf), 8)]
 
 
-def _bytes_from_words(words: list[int]) -> bytes:
+def _bytes_from_words_pure(words: list[int]) -> bytes:
     return b"".join(w.to_bytes(8, "little") for w in words)
+
+
+# Fast helpers using numpy when available
+try:
+    import numpy as _np
+
+    _HAS_NUMPY = True
+except Exception:
+    _np = None  # type: ignore
+    _HAS_NUMPY = False
+
+
+def _words_from_bytes(buf: bytes) -> list[int]:
+    if _HAS_NUMPY:
+        try:
+            return _np.frombuffer(buf, dtype=_np.dtype("<u8")).tolist()
+        except Exception:
+            pass
+    return _words_from_bytes_pure(buf)
+
+
+def _bytes_from_words(words: list[int]) -> bytes:
+    if _HAS_NUMPY:
+        try:
+            # words may be list or numpy array
+            if isinstance(words, _np.ndarray):
+                # ensure little endian
+                return words.astype(_np.dtype("<u8"), copy=False).tobytes()
+            return _np.array(words, dtype=_np.dtype("<u8")).tobytes()
+        except Exception:
+            pass
+    return _bytes_from_words_pure(words)
 
 
 def index_alpha(
@@ -190,10 +231,7 @@ def make_address_input(
     time_cost: int,
     type_: Type,
 ) -> list[int]:
-    """Build the argon2i address-generator input block Z (RFC 9106 §3.4.1).
-
-    Words: pass, lane, slice, m', t, y, counter=0, then zeros.
-    """
+    """Build the argon2i address-generator input block Z (RFC 9106 §3.4.1)."""
     block = [0] * BLOCK_WORDS
     block[0] = int(pass_)
     block[1] = int(lane)
@@ -202,6 +240,329 @@ def make_address_input(
     block[4] = int(time_cost)
     block[5] = int(type_)
     return block
+
+
+# ---------------------------------------------------------------------------
+# Optional numba-accelerated path
+# ---------------------------------------------------------------------------
+try:
+    import numba  # type: ignore
+    import numpy as np  # type: ignore
+
+    _HAS_NUMBA = True
+except Exception:
+    numba = None  # type: ignore
+    np = _np  # type: ignore
+    _HAS_NUMBA = False
+
+if _HAS_NUMBA:
+    @numba.njit  # type: ignore
+    def _rotr64_numba(x, n):
+        return (x >> np.uint64(n)) | (x << np.uint64(64 - n))
+
+    @numba.njit  # type: ignore
+    def _fbla_numba(a, b):
+        return a + b + np.uint64(2) * ((a & np.uint64(0xFFFFFFFF)) * (b & np.uint64(0xFFFFFFFF)))
+
+    @numba.njit  # type: ignore
+    def _blamka_g_numba(v, a, b, c, d):
+        v[a] = _fbla_numba(v[a], v[b])
+        v[d] = _rotr64_numba(v[d] ^ v[a], 32)
+        v[c] = _fbla_numba(v[c], v[d])
+        v[b] = _rotr64_numba(v[b] ^ v[c], 24)
+        v[a] = _fbla_numba(v[a], v[b])
+        v[d] = _rotr64_numba(v[d] ^ v[a], 16)
+        v[c] = _fbla_numba(v[c], v[d])
+        v[b] = _rotr64_numba(v[b] ^ v[c], 63)
+
+    @numba.njit  # type: ignore
+    def _argon2_p_numba(v):
+        _blamka_g_numba(v, 0, 4, 8, 12)
+        _blamka_g_numba(v, 1, 5, 9, 13)
+        _blamka_g_numba(v, 2, 6, 10, 14)
+        _blamka_g_numba(v, 3, 7, 11, 15)
+        _blamka_g_numba(v, 0, 5, 10, 15)
+        _blamka_g_numba(v, 1, 6, 11, 12)
+        _blamka_g_numba(v, 2, 7, 8, 13)
+        _blamka_g_numba(v, 3, 4, 9, 14)
+
+    @numba.njit  # type: ignore
+    def _compress_g_numba_impl(x, y, dest, out, with_xor):
+        tmp = np.empty(128, dtype=np.uint64)
+        for i in range(128):
+            r = x[i] ^ y[i]
+            out[i] = r
+            tmp[i] = r
+        for row in range(8):
+            base = row * 16
+            v = np.empty(16, dtype=np.uint64)
+            for kk in range(16):
+                v[kk] = out[base + kk]
+            _argon2_p_numba(v)
+            for kk in range(16):
+                out[base + kk] = v[kk]
+        for col in range(8):
+            v = np.empty(16, dtype=np.uint64)
+            v[0] = out[2 * col]
+            v[1] = out[2 * col + 1]
+            v[2] = out[2 * col + 16]
+            v[3] = out[2 * col + 17]
+            v[4] = out[2 * col + 32]
+            v[5] = out[2 * col + 33]
+            v[6] = out[2 * col + 48]
+            v[7] = out[2 * col + 49]
+            v[8] = out[2 * col + 64]
+            v[9] = out[2 * col + 65]
+            v[10] = out[2 * col + 80]
+            v[11] = out[2 * col + 81]
+            v[12] = out[2 * col + 96]
+            v[13] = out[2 * col + 97]
+            v[14] = out[2 * col + 112]
+            v[15] = out[2 * col + 113]
+            _argon2_p_numba(v)
+            out[2 * col] = v[0]
+            out[2 * col + 1] = v[1]
+            out[2 * col + 16] = v[2]
+            out[2 * col + 17] = v[3]
+            out[2 * col + 32] = v[4]
+            out[2 * col + 33] = v[5]
+            out[2 * col + 48] = v[6]
+            out[2 * col + 49] = v[7]
+            out[2 * col + 64] = v[8]
+            out[2 * col + 65] = v[9]
+            out[2 * col + 80] = v[10]
+            out[2 * col + 81] = v[11]
+            out[2 * col + 96] = v[12]
+            out[2 * col + 97] = v[13]
+            out[2 * col + 112] = v[14]
+            out[2 * col + 113] = v[15]
+        for i in range(128):
+            if with_xor:
+                out[i] = out[i] ^ tmp[i] ^ dest[i]
+            else:
+                out[i] = out[i] ^ tmp[i]
+
+    @numba.njit  # type: ignore
+    def _index_alpha_numba(pass_, slice_, index, lane_length, segment_length, pseudo_rand_lo, same_lane):
+        if pass_ == 0:
+            if slice_ == 0:
+                ref_area = index - 1
+            elif same_lane:
+                ref_area = slice_ * segment_length + index - 1
+            else:
+                if index == 0:
+                    ref_area = slice_ * segment_length - 1
+                else:
+                    ref_area = slice_ * segment_length
+        else:
+            if same_lane:
+                ref_area = lane_length - segment_length + index - 1
+            else:
+                if index == 0:
+                    ref_area = lane_length - segment_length - 1
+                else:
+                    ref_area = lane_length - segment_length
+        rel = (pseudo_rand_lo * pseudo_rand_lo) >> np.uint64(32)
+        rel = np.uint64(ref_area) - np.uint64(1) - ((np.uint64(ref_area) * rel) >> np.uint64(32))
+        if pass_ == 0:
+            start = np.uint64(0)
+        else:
+            if slice_ == 3:
+                start = np.uint64(0)
+            else:
+                start = np.uint64((slice_ + 1) * segment_length)
+        return (start + rel) % np.uint64(lane_length)
+
+    @numba.njit  # type: ignore
+    def _fill_segment_independent_numba(memory, pass_, slice_, lane, lanes, lane_length, segment_length, starting, pseudo_rands, with_xor):
+        curr_base = lane * lane_length + slice_ * segment_length
+        out_buf = np.empty(128, dtype=np.uint64)
+        dest_buf = np.empty(128, dtype=np.uint64)
+        tmp_local = np.empty(128, dtype=np.uint64)
+        for i in range(starting, segment_length):
+            curr = curr_base + i
+            if curr % lane_length == 0:
+                prev = curr + lane_length - 1
+            else:
+                prev = curr - 1
+            pseudo_rand = pseudo_rands[i]
+            if pass_ == 0 and slice_ == 0:
+                ref_lane = np.uint64(lane)
+            else:
+                ref_lane = (pseudo_rand >> np.uint64(32)) % np.uint64(lanes)
+            same_lane = ref_lane == np.uint64(lane)
+            pseudo_lo = pseudo_rand & np.uint64(0xFFFFFFFF)
+            ref_index = _index_alpha_numba(pass_, slice_, i, lane_length, segment_length, pseudo_lo, same_lane)
+            ref = ref_lane * np.uint64(lane_length) + ref_index
+            if with_xor:
+                for k in range(128):
+                    dest_buf[k] = memory[curr, k]
+            for k in range(128):
+                r = memory[prev, k] ^ memory[ref, k]
+                out_buf[k] = r
+                tmp_local[k] = r
+            for row in range(8):
+                base = row * 16
+                v = np.empty(16, dtype=np.uint64)
+                for kk in range(16):
+                    v[kk] = out_buf[base + kk]
+                _argon2_p_numba(v)
+                for kk in range(16):
+                    out_buf[base + kk] = v[kk]
+            for col in range(8):
+                v = np.empty(16, dtype=np.uint64)
+                v[0] = out_buf[2 * col]
+                v[1] = out_buf[2 * col + 1]
+                v[2] = out_buf[2 * col + 16]
+                v[3] = out_buf[2 * col + 17]
+                v[4] = out_buf[2 * col + 32]
+                v[5] = out_buf[2 * col + 33]
+                v[6] = out_buf[2 * col + 48]
+                v[7] = out_buf[2 * col + 49]
+                v[8] = out_buf[2 * col + 64]
+                v[9] = out_buf[2 * col + 65]
+                v[10] = out_buf[2 * col + 80]
+                v[11] = out_buf[2 * col + 81]
+                v[12] = out_buf[2 * col + 96]
+                v[13] = out_buf[2 * col + 97]
+                v[14] = out_buf[2 * col + 112]
+                v[15] = out_buf[2 * col + 113]
+                _argon2_p_numba(v)
+                out_buf[2 * col] = v[0]
+                out_buf[2 * col + 1] = v[1]
+                out_buf[2 * col + 16] = v[2]
+                out_buf[2 * col + 17] = v[3]
+                out_buf[2 * col + 32] = v[4]
+                out_buf[2 * col + 33] = v[5]
+                out_buf[2 * col + 48] = v[6]
+                out_buf[2 * col + 49] = v[7]
+                out_buf[2 * col + 64] = v[8]
+                out_buf[2 * col + 65] = v[9]
+                out_buf[2 * col + 80] = v[10]
+                out_buf[2 * col + 81] = v[11]
+                out_buf[2 * col + 96] = v[12]
+                out_buf[2 * col + 97] = v[13]
+                out_buf[2 * col + 112] = v[14]
+                out_buf[2 * col + 113] = v[15]
+            for k in range(128):
+                if with_xor:
+                    out_buf[k] = out_buf[k] ^ tmp_local[k] ^ dest_buf[k]
+                else:
+                    out_buf[k] = out_buf[k] ^ tmp_local[k]
+            for k in range(128):
+                memory[curr, k] = out_buf[k]
+
+    @numba.njit  # type: ignore
+    def _fill_segment_dependent_numba(memory, pass_, slice_, lane, lanes, lane_length, segment_length, starting, with_xor):
+        curr_base = lane * lane_length + slice_ * segment_length
+        out_buf = np.empty(128, dtype=np.uint64)
+        dest_buf = np.empty(128, dtype=np.uint64)
+        tmp_local = np.empty(128, dtype=np.uint64)
+        for i in range(starting, segment_length):
+            curr = curr_base + i
+            if curr % lane_length == 0:
+                prev = curr + lane_length - 1
+            else:
+                prev = curr - 1
+            pseudo_rand = memory[prev, 0]
+            if pass_ == 0 and slice_ == 0:
+                ref_lane = np.uint64(lane)
+            else:
+                ref_lane = (pseudo_rand >> np.uint64(32)) % np.uint64(lanes)
+            same_lane = ref_lane == np.uint64(lane)
+            pseudo_lo = pseudo_rand & np.uint64(0xFFFFFFFF)
+            ref_index = _index_alpha_numba(pass_, slice_, i, lane_length, segment_length, pseudo_lo, same_lane)
+            ref = ref_lane * np.uint64(lane_length) + ref_index
+            if with_xor:
+                for k in range(128):
+                    dest_buf[k] = memory[curr, k]
+            for k in range(128):
+                r = memory[prev, k] ^ memory[ref, k]
+                out_buf[k] = r
+                tmp_local[k] = r
+            for row in range(8):
+                base = row * 16
+                v = np.empty(16, dtype=np.uint64)
+                for kk in range(16):
+                    v[kk] = out_buf[base + kk]
+                _argon2_p_numba(v)
+                for kk in range(16):
+                    out_buf[base + kk] = v[kk]
+            for col in range(8):
+                v = np.empty(16, dtype=np.uint64)
+                v[0] = out_buf[2 * col]
+                v[1] = out_buf[2 * col + 1]
+                v[2] = out_buf[2 * col + 16]
+                v[3] = out_buf[2 * col + 17]
+                v[4] = out_buf[2 * col + 32]
+                v[5] = out_buf[2 * col + 33]
+                v[6] = out_buf[2 * col + 48]
+                v[7] = out_buf[2 * col + 49]
+                v[8] = out_buf[2 * col + 64]
+                v[9] = out_buf[2 * col + 65]
+                v[10] = out_buf[2 * col + 80]
+                v[11] = out_buf[2 * col + 81]
+                v[12] = out_buf[2 * col + 96]
+                v[13] = out_buf[2 * col + 97]
+                v[14] = out_buf[2 * col + 112]
+                v[15] = out_buf[2 * col + 113]
+                _argon2_p_numba(v)
+                out_buf[2 * col] = v[0]
+                out_buf[2 * col + 1] = v[1]
+                out_buf[2 * col + 16] = v[2]
+                out_buf[2 * col + 17] = v[3]
+                out_buf[2 * col + 32] = v[4]
+                out_buf[2 * col + 33] = v[5]
+                out_buf[2 * col + 48] = v[6]
+                out_buf[2 * col + 49] = v[7]
+                out_buf[2 * col + 64] = v[8]
+                out_buf[2 * col + 65] = v[9]
+                out_buf[2 * col + 80] = v[10]
+                out_buf[2 * col + 81] = v[11]
+                out_buf[2 * col + 96] = v[12]
+                out_buf[2 * col + 97] = v[13]
+                out_buf[2 * col + 112] = v[14]
+                out_buf[2 * col + 113] = v[15]
+            for k in range(128):
+                if with_xor:
+                    out_buf[k] = out_buf[k] ^ tmp_local[k] ^ dest_buf[k]
+                else:
+                    out_buf[k] = out_buf[k] ^ tmp_local[k]
+            for k in range(128):
+                memory[curr, k] = out_buf[k]
+
+    def _compress_g_numba(x, y, with_xor=None):
+        x_np = np.array(x, dtype=np.uint64)
+        y_np = np.array(y, dtype=np.uint64)
+        if with_xor is not None:
+            dest_np = np.array(with_xor, dtype=np.uint64)
+            with_flag = True
+        else:
+            dest_np = np.empty(128, dtype=np.uint64)
+            with_flag = False
+        out_np = np.empty(128, dtype=np.uint64)
+        _compress_g_numba_impl(x_np, y_np, dest_np, out_np, with_flag)
+        return out_np.tolist()
+
+else:
+    # no numba — placeholders
+    def _compress_g_numba(x, y, with_xor=None):  # type: ignore
+        raise RuntimeError("numba not available")
+
+
+# Public compress_g — fast path if numba present, else pure
+def compress_g(x: list[int], y: list[int], with_xor: list[int] | None = None) -> list[int]:
+    if _HAS_NUMBA:
+        try:
+            return _compress_g_numba(x, y, with_xor)
+        except Exception:
+            pass
+    return _compress_g_pure(x, y, with_xor)
+
+
+# Keep original name for compatibility with tests that import compress_g
+# and also expose pure version
+compress_g_pure = _compress_g_pure
 
 
 def next_addresses(input_block: list[int]) -> list[int]:
@@ -346,7 +707,7 @@ def argon2(
     return tag
 
 
-def argon2_fill(
+def _argon2_fill_pure(
     password: bytes,
     salt: bytes,
     *,
@@ -359,7 +720,6 @@ def argon2_fill(
     type_: Type = Type.ID,
     version: int = VERSION_13,
 ) -> tuple[bytes, list[list[int]]]:
-    """Like argon2(), but also return the m' working set after the last pass."""
     memory_blocks, lane_length, segment_length = _derive(
         time_cost=time_cost,
         memory_cost=memory_cost,
@@ -382,7 +742,7 @@ def argon2_fill(
     for pass_ in range(time_cost):
         for slice_ in range(SYNC_POINTS):
             for lane in range(parallelism):
-                _fill_segment(
+                _fill_segment_pure(
                     memory,
                     pass_=pass_,
                     slice_=slice_,
@@ -404,7 +764,7 @@ def argon2_fill(
     return tag, memory
 
 
-def _fill_segment(
+def _fill_segment_pure(
     memory: list[list[int]],
     *,
     pass_: int,
@@ -424,10 +784,6 @@ def _fill_segment(
     address_block: list[int] = []
 
     starting = 2 if pass_ == 0 and slice_ == 0 else 0
-    # PHC reference: pre-generate the first address block only for the
-    # already-initialized first two blocks of pass 0 / slice 0. Every
-    # subsequent refresh is `if i % 128 == 0` inside the loop (which
-    # fires at i=0 of later segments, and at i=128, 256, … everywhere).
     if independent and pass_ == 0 and slice_ == 0:
         address_block = _next_addresses(input_block)
 
@@ -461,12 +817,159 @@ def _fill_segment(
         ref = memory[lane_length * ref_lane + ref_index]
         dest = memory[curr]
         if pass_ == 0:
-            memory[curr] = compress_g(memory[prev], ref)
+            memory[curr] = _compress_g_pure(memory[prev], ref)
         else:
-            memory[curr] = compress_g(memory[prev], ref, with_xor=dest)
+            memory[curr] = _compress_g_pure(memory[prev], ref, with_xor=dest)
 
         curr += 1
         prev += 1
+
+
+def _argon2_fill_fast(
+    password: bytes,
+    salt: bytes,
+    *,
+    time_cost: int = 3,
+    memory_cost: int = 32,
+    parallelism: int = 4,
+    hash_len: int = 32,
+    secret: bytes = b"",
+    associated_data: bytes = b"",
+    type_: Type = Type.ID,
+    version: int = VERSION_13,
+) -> tuple[bytes, list[list[int]]]:
+    # Requires numpy + numba
+    assert _HAS_NUMBA and _HAS_NUMPY
+    memory_blocks, lane_length, segment_length = _derive(
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+    )
+    # allocate numpy memory
+    mem_np = np.zeros((memory_blocks, 128), dtype=np.uint64)
+    h0 = argon2_h0(
+        password,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+        secret=secret,
+        associated_data=associated_data,
+        type_=type_,
+        version=version,
+    )
+    for lane in range(parallelism):
+        for idx in [0, 1]:
+            data = h0 + _le32(idx) + _le32(lane)
+            block_bytes = h_prime(data, BLOCK_BYTES)
+            words = np.frombuffer(block_bytes, dtype=np.dtype("<u8"))
+            mem_np[lane * lane_length + idx] = words
+
+    for pass_ in range(time_cost):
+        for slice_ in range(SYNC_POINTS):
+            for lane in range(parallelism):
+                starting = 2 if pass_ == 0 and slice_ == 0 else 0
+                with_xor = pass_ != 0
+                independent = _data_independent(type_, pass_, slice_)
+                if independent:
+                    pseudo_rands = np.zeros(segment_length, dtype=np.uint64)
+                    ib_list = make_address_input(pass_, lane, slice_, memory_blocks, time_cost, type_)
+                    cur_block: list[int] = []
+                    for i in range(segment_length):
+                        if i % ADDRESSES_PER_BLOCK == 0:
+                            cur_block = next_addresses(ib_list)
+                        pseudo_rands[i] = cur_block[i % ADDRESSES_PER_BLOCK]
+                    _fill_segment_independent_numba(
+                        mem_np, pass_, slice_, lane, parallelism, lane_length, segment_length, starting, pseudo_rands, with_xor
+                    )
+                else:
+                    _fill_segment_dependent_numba(
+                        mem_np, pass_, slice_, lane, parallelism, lane_length, segment_length, starting, with_xor
+                    )
+
+    c = np.zeros(128, dtype=np.uint64)
+    for lane in range(parallelism):
+        last = mem_np[lane * lane_length + lane_length - 1]
+        c ^= last
+    tag = h_prime(c.tobytes(), hash_len)
+    # convert to list of lists for API compatibility
+    mem_list = [row.tolist() for row in mem_np]
+    return tag, mem_list
+
+
+def argon2_fill(
+    password: bytes,
+    salt: bytes,
+    *,
+    time_cost: int = 3,
+    memory_cost: int = 32,
+    parallelism: int = 4,
+    hash_len: int = 32,
+    secret: bytes = b"",
+    associated_data: bytes = b"",
+    type_: Type = Type.ID,
+    version: int = VERSION_13,
+) -> tuple[bytes, list[list[int]]]:
+    """Like argon2(), but also return the m' working set after the last pass."""
+    if _HAS_NUMBA and _HAS_NUMPY:
+        try:
+            return _argon2_fill_fast(
+                password,
+                salt,
+                time_cost=time_cost,
+                memory_cost=memory_cost,
+                parallelism=parallelism,
+                hash_len=hash_len,
+                secret=secret,
+                associated_data=associated_data,
+                type_=type_,
+                version=version,
+            )
+        except Exception:
+            # fallback to pure on any error
+            pass
+    return _argon2_fill_pure(
+        password,
+        salt,
+        time_cost=time_cost,
+        memory_cost=memory_cost,
+        parallelism=parallelism,
+        hash_len=hash_len,
+        secret=secret,
+        associated_data=associated_data,
+        type_=type_,
+        version=version,
+    )
+
+
+def _fill_segment(
+    memory: list[list[int]],
+    *,
+    pass_: int,
+    slice_: int,
+    lane: int,
+    lanes: int,
+    lane_length: int,
+    segment_length: int,
+    memory_blocks: int,
+    time_cost: int,
+    type_: Type,
+) -> None:
+    # Compatibility shim — pure version
+    return _fill_segment_pure(
+        memory,
+        pass_=pass_,
+        slice_=slice_,
+        lane=lane,
+        lanes=lanes,
+        lane_length=lane_length,
+        segment_length=segment_length,
+        memory_blocks=memory_blocks,
+        time_cost=time_cost,
+        type_=type_,
+    )
 
 
 def argon2d(password: bytes, salt: bytes, **kw) -> bytes:

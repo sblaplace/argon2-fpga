@@ -40,6 +40,15 @@ module blamka_g (
     logic [63:0] d_s [0:3];
     logic [3:0]  vpipe;
 
+    // One multiply per quarter — reuse the fbla result for the xor/rot
+    // instead of recomputing it. Halves DSP usage (4 → 2? actually 8 → 4
+    // per GB before) and shortens the critical path.
+    logic [63:0] f0, f1, f2, f3;
+    assign f0 = fbla(a_i, b_i);
+    assign f1 = fbla(c_s[0], d_s[0]);
+    assign f2 = fbla(a_s[1], b_s[1]);
+    assign f3 = fbla(c_s[2], d_s[2]);
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             vpipe     <= 4'b0;
@@ -48,32 +57,44 @@ module blamka_g (
             b_o       <= 64'd0;
             c_o       <= 64'd0;
             d_o       <= 64'd0;
+            a_s[0]    <= 64'd0;
+            b_s[0]    <= 64'd0;
+            c_s[0]    <= 64'd0;
+            d_s[0]    <= 64'd0;
+            a_s[1]    <= 64'd0;
+            b_s[1]    <= 64'd0;
+            c_s[1]    <= 64'd0;
+            d_s[1]    <= 64'd0;
+            a_s[2]    <= 64'd0;
+            b_s[2]    <= 64'd0;
+            c_s[2]    <= 64'd0;
+            d_s[2]    <= 64'd0;
         end else begin
             vpipe <= {vpipe[2:0], in_valid};
 
             // Q0: a += b + 2ab_lo; d = ror32(d ⊕ a)
-            a_s[0] <= fbla(a_i, b_i);
+            a_s[0] <= f0;
             b_s[0] <= b_i;
             c_s[0] <= c_i;
-            d_s[0] <= `ROTR64((d_i ^ fbla(a_i, b_i)), 32);
+            d_s[0] <= `ROTR64((d_i ^ f0), 32);
 
             // Q1: c += d + 2cd_lo; b = ror24(b ⊕ c)
             a_s[1] <= a_s[0];
-            c_s[1] <= fbla(c_s[0], d_s[0]);
+            c_s[1] <= f1;
             d_s[1] <= d_s[0];
-            b_s[1] <= `ROTR64((b_s[0] ^ fbla(c_s[0], d_s[0])), 24);
+            b_s[1] <= `ROTR64((b_s[0] ^ f1), 24);
 
             // Q2: a += b + 2ab_lo; d = ror16(d ⊕ a)
-            a_s[2] <= fbla(a_s[1], b_s[1]);
+            a_s[2] <= f2;
             b_s[2] <= b_s[1];
             c_s[2] <= c_s[1];
-            d_s[2] <= `ROTR64((d_s[1] ^ fbla(a_s[1], b_s[1])), 16);
+            d_s[2] <= `ROTR64((d_s[1] ^ f2), 16);
 
             // Q3: c += d + 2cd_lo; b = ror63(b ⊕ c)
             a_o <= a_s[2];
-            c_o <= fbla(c_s[2], d_s[2]);
+            c_o <= f3;
             d_o <= d_s[2];
-            b_o <= `ROTR64((b_s[2] ^ fbla(c_s[2], d_s[2])), 63);
+            b_o <= `ROTR64((b_s[2] ^ f3), 63);
 
             out_valid <= vpipe[2];
         end

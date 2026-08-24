@@ -95,21 +95,12 @@ def blake2b_compress(h: list[int], block: bytes, t0: int, t1: int, last: bool) -
         h[i] ^= v[i] ^ v[i + 8]
 
 
-def blake2b(data: bytes, digest_size: int = 64, key: bytes = b"") -> bytes:
-    """Keyed or unkeyed BLAKE2b. digest_size is nn in 1..64."""
-    if not 1 <= digest_size <= 64:
-        raise ValueError("digest_size must be in 1..64")
-    if len(key) > 64:
-        raise ValueError("key longer than 64 bytes")
-
+def _blake2b_pure(data: bytes, digest_size: int = 64, key: bytes = b"") -> bytes:
+    """Pure-Python reference (slow) — kept for verification."""
     h = list(IV)
-    # Parameter block: 0x0101kk nn in the low 32 bits of h[0].
     h[0] ^= 0x01010000 ^ (len(key) << 8) ^ digest_size
-
     t0 = 0
     t1 = 0
-
-    # If keyed, the key is the first 128-byte block (zero-padded).
     buf = (key + bytes(128 - len(key))) if key else b""
     offset = 0
 
@@ -120,7 +111,6 @@ def blake2b(data: bytes, digest_size: int = 64, key: bytes = b"") -> bytes:
             t1 = (t1 + 1) & MASK64
         blake2b_compress(h, chunk + bytes(128 - len(chunk)), t0, t1, last)
 
-    # Stream remaining data. Always compress a final (possibly empty) block.
     while offset < len(data):
         take = 128 - len(buf)
         buf += data[offset : offset + take]
@@ -132,3 +122,19 @@ def blake2b(data: bytes, digest_size: int = 64, key: bytes = b"") -> bytes:
     absorb(buf, last=True)
     out = b"".join(word.to_bytes(8, "little") for word in h)
     return out[:digest_size]
+
+
+def blake2b(data: bytes, digest_size: int = 64, key: bytes = b"") -> bytes:
+    """Keyed or unkeyed BLAKE2b. Fast path via hashlib, fallback to pure."""
+    if not 1 <= digest_size <= 64:
+        raise ValueError("digest_size must be in 1..64")
+    if len(key) > 64:
+        raise ValueError("key longer than 64 bytes")
+    try:
+        import hashlib
+
+        if key:
+            return hashlib.blake2b(data, digest_size=digest_size, key=key).digest()
+        return hashlib.blake2b(data, digest_size=digest_size).digest()
+    except Exception:
+        return _blake2b_pure(data, digest_size=digest_size, key=key)
