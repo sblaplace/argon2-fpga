@@ -119,7 +119,8 @@ module tb_p4_perf #(
     for (genvar g = 0; g < P; g++) begin : ch
         argon2_axi_mm #(
             .AXI_ADDR_W(ADDR_W), .AXI_ID_W(ID_W),
-            .AXI_DATA_W(DATA_W), .BLK_ADDR_W(32)
+            .AXI_DATA_W(DATA_W), .BLK_ADDR_W(32),
+            .MAX_RD_PEND(4)
         ) u_mm (
             .clk(clk), .rst_n(rst_n), .base_addr(64'd0),
             .mem_rd_valid(c_rd_valid[g]), .mem_rd_ready(c_rd_ready[g]),

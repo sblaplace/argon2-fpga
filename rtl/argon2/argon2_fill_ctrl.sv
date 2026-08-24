@@ -641,6 +641,8 @@ module argon2_fill_ctrl #(
                         end else begin
                             state <= ISSUE_PREV;
                         end
+                    end else if (independent && (pref_issued || pref_accepted)) begin
+                        state <= DISPATCH;
                     end else if (independent) begin
                         if (cache_hit_ref) begin
                             // Ref is the last-written block: forward from the

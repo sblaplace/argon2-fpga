@@ -79,14 +79,14 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
 - [x] **Partitioned-memory p=4** (`argon2_mem_xbar`): the cross-channel
       read router the floorplan thesis needs — routes each lane's reference
       read to the owning channel (owner hint, no runtime divider), passes
-      writes through 1:1, tag-returns the 16-beat responses. Verified by
-      `tb_argon2_p4` (RFC §5 vector + m'∈{64,128} sweep + non-pow2 m'=48,
-      i/d/id, N_P=1/8, four *separate* local-addressed memories) and
-      measured by `tb_p4_perf` on four cycle-accurate DDR4 channels:
-      **1×p=4 ≈ 3.0 cand/s on 4 channels** (200 MHz, N_P=8) vs 4×p=1
-      ≈ 4.1 — ~73% aggregate efficiency and 4× better per-candidate
-      latency. Landing it also fixed two latent request-mutation hazards
-      in `argon2_fill_ctrl` (see `docs/PERFORMANCE.md`).
+      writes through 1:1, tag-returns the 16-beat responses with pipelined
+      multi-outstanding read support. Verified by `tb_argon2_p4` (RFC §5
+      vector + m'∈{64,128} sweep + non-pow2 m'=48, i/d/id, N_P=1/8, four
+      *separate* local-addressed memories) and measured by `tb_p4_perf` on
+      four cycle-accurate DDR4 channels: **1×p=4 ≈ 3.5–3.6 cand/s on 4 channels**
+      (200 MHz, N_P=8) vs 4×p=1 ≈ 4.1 — **~87% aggregate efficiency** and 4×
+      better per-candidate latency. Landing it also fixed two latent request-mutation
+      hazards in `argon2_fill_ctrl` (see `docs/PERFORMANCE.md`).
 - [x] AXI4-MM adapter (`argon2_axi_mm` / `argon2_fill_axi`): 512-bit,
       16-beat bursts, independent R/W so a prefetch can overlap a write.
 - [x] F1 CL shell scaffold (`fpga/f1/`): `cl_argon2` top mapping the

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Block-addressed fill-controller port → AXI4-MM (512-bit).
 //
-// One 16-beat INCR burst per 1 KiB Argon2 block. One outstanding read
-// (matches argon2_fill_ctrl). Read and write channels are independent
-// so a prefetch can return while a write burst is in flight — the fill
-// loop does exactly that.
+// One 16-beat INCR burst per 1 KiB Argon2 block. Supports MAX_RD_PEND
+// in-flight read transactions (default 1 for single lane, >1 for multi-channel
+// crossbars). Read and write channels are independent so a prefetch can
+// return while a write burst is in flight.
 //
 // Sized for AWS F1 sh_ddr / Alveo HBM AXI-MM. `base_addr` is the byte
 // address of block 0 and must be 1 KiB-aligned.
@@ -12,10 +12,11 @@
 `timescale 1ns / 1ps
 
 module argon2_axi_mm #(
-    parameter int AXI_ADDR_W = 64,
-    parameter int AXI_ID_W   = 6,
-    parameter int AXI_DATA_W = 512,
-    parameter int BLK_ADDR_W = 32
+    parameter int AXI_ADDR_W  = 64,
+    parameter int AXI_ID_W    = 6,
+    parameter int AXI_DATA_W  = 512,
+    parameter int BLK_ADDR_W  = 32,
+    parameter int MAX_RD_PEND = 1
 ) (
     input  logic                      clk,
     input  logic                      rst_n,
@@ -78,15 +79,9 @@ module argon2_axi_mm #(
 );
     localparam int AXI_SIZE = $clog2(AXI_DATA_W / 8);
 
-    logic rd_pend;
+    // Common write path
     logic wr_aw_sent;
     logic wr_b_wait;
-
-    assign mem_rd_ready = !rd_pend && !m_axi_arvalid;
-    assign m_axi_rready = rd_pend;
-    assign mem_rd_data_v = m_axi_rvalid && m_axi_rready;
-    assign mem_rd_data   = m_axi_rdata;
-    assign mem_rd_last   = m_axi_rlast;
 
     assign mem_wr_ready = wr_aw_sent && m_axi_wready && !wr_b_wait;
     assign m_axi_wvalid = mem_wr_valid && wr_aw_sent && !wr_b_wait;
@@ -113,40 +108,114 @@ module argon2_axi_mm #(
     assign m_axi_arprot  = 3'b000;
     assign m_axi_arqos   = 4'b0000;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_pend       <= 1'b0;
-            m_axi_arvalid <= 1'b0;
-            m_axi_araddr  <= '0;
-            wr_aw_sent    <= 1'b0;
-            wr_b_wait     <= 1'b0;
-            m_axi_awvalid <= 1'b0;
-            m_axi_awaddr  <= '0;
-        end else begin
-            if (mem_rd_valid && mem_rd_ready) begin
-                m_axi_arvalid <= 1'b1;
-                m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
-                rd_pend       <= 1'b1;
-            end
-            if (m_axi_arvalid && m_axi_arready)
-                m_axi_arvalid <= 1'b0;
-            if (m_axi_rvalid && m_axi_rready && m_axi_rlast)
-                rd_pend <= 1'b0;
+    assign mem_rd_data   = m_axi_rdata;
+    assign mem_rd_last   = m_axi_rlast;
 
-            if (mem_wr_valid && !wr_aw_sent && !wr_b_wait && !m_axi_awvalid) begin
-                m_axi_awvalid <= 1'b1;
-                m_axi_awaddr  <= base_addr + (AXI_ADDR_W'(mem_wr_addr) << 10);
-            end
-            if (m_axi_awvalid && m_axi_awready) begin
+    if (MAX_RD_PEND <= 1) begin : g_single_read
+        logic rd_pend;
+
+        assign mem_rd_ready  = !rd_pend && !m_axi_arvalid;
+        assign m_axi_rready  = rd_pend;
+        assign mem_rd_data_v = m_axi_rvalid && m_axi_rready;
+
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                rd_pend       <= 1'b0;
+                m_axi_arvalid <= 1'b0;
+                m_axi_araddr  <= '0;
+                wr_aw_sent    <= 1'b0;
+                wr_b_wait     <= 1'b0;
                 m_axi_awvalid <= 1'b0;
-                wr_aw_sent    <= 1'b1;
+                m_axi_awaddr  <= '0;
+            end else begin
+                if (mem_rd_valid && mem_rd_ready) begin
+                    m_axi_arvalid <= 1'b1;
+                    m_axi_araddr  <= base_addr + (AXI_ADDR_W'(mem_rd_addr) << 10);
+                    rd_pend       <= 1'b1;
+                end
+                if (m_axi_arvalid && m_axi_arready)
+                    m_axi_arvalid <= 1'b0;
+                if (m_axi_rvalid && m_axi_rready && m_axi_rlast)
+                    rd_pend <= 1'b0;
+
+                // Write handshakes
+                if (mem_wr_valid && !wr_aw_sent && !wr_b_wait && !m_axi_awvalid) begin
+                    m_axi_awvalid <= 1'b1;
+                    m_axi_awaddr  <= base_addr + (AXI_ADDR_W'(mem_wr_addr) << 10);
+                end
+                if (m_axi_awvalid && m_axi_awready) begin
+                    m_axi_awvalid <= 1'b0;
+                    wr_aw_sent    <= 1'b1;
+                end
+                if (m_axi_wvalid && m_axi_wready && m_axi_wlast) begin
+                    wr_aw_sent <= 1'b0;
+                    wr_b_wait  <= 1'b1;
+                end
+                if (m_axi_bvalid && m_axi_bready)
+                    wr_b_wait <= 1'b0;
             end
-            if (m_axi_wvalid && m_axi_wready && m_axi_wlast) begin
-                wr_aw_sent <= 1'b0;
-                wr_b_wait  <= 1'b1;
+        end
+    end else begin : g_multi_read
+        localparam int AR_FIFO_DEPTH = MAX_RD_PEND;
+        localparam int AW_PTR = $clog2(AR_FIFO_DEPTH);
+
+        logic [BLK_ADDR_W-1:0] ar_q_addr [0:AR_FIFO_DEPTH-1];
+        logic [AW_PTR-1:0]     ar_wr_ptr, ar_rd_ptr;
+        logic [3:0]            ar_count;
+        logic [3:0]            rd_in_flight;
+
+        assign mem_rd_ready  = (ar_count < 4'(AR_FIFO_DEPTH)) && (rd_in_flight < 4'(MAX_RD_PEND));
+        assign m_axi_arvalid = (ar_count != 4'd0);
+        assign m_axi_araddr  = base_addr + (AXI_ADDR_W'(ar_q_addr[ar_rd_ptr]) << 10);
+        assign m_axi_rready  = (rd_in_flight != 4'd0);
+        assign mem_rd_data_v = m_axi_rvalid && m_axi_rready;
+
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                ar_wr_ptr     <= '0;
+                ar_rd_ptr     <= '0;
+                ar_count      <= 4'd0;
+                rd_in_flight  <= 4'd0;
+                wr_aw_sent    <= 1'b0;
+                wr_b_wait     <= 1'b0;
+                m_axi_awvalid <= 1'b0;
+                m_axi_awaddr  <= '0;
+                for (int i = 0; i < AR_FIFO_DEPTH; i++)
+                    ar_q_addr[i] <= '0;
+            end else begin
+                logic rd_enq, ar_sent, r_done;
+                rd_enq  = mem_rd_valid && mem_rd_ready;
+                ar_sent = m_axi_arvalid && m_axi_arready;
+                r_done  = m_axi_rvalid && m_axi_rready && m_axi_rlast;
+
+                if (rd_enq) begin
+                    ar_q_addr[ar_wr_ptr] <= mem_rd_addr;
+                    ar_wr_ptr <= (ar_wr_ptr == AW_PTR'(AR_FIFO_DEPTH - 1)) ? '0 : (ar_wr_ptr + 1'b1);
+                end
+                if (ar_sent) begin
+                    ar_rd_ptr <= (ar_rd_ptr == AW_PTR'(AR_FIFO_DEPTH - 1)) ? '0 : (ar_rd_ptr + 1'b1);
+                end
+
+                ar_count     <= ar_count + (rd_enq ? 4'd1 : 4'd0) - (ar_sent ? 4'd1 : 4'd0);
+                rd_in_flight <= rd_in_flight + (rd_enq ? 4'd1 : 4'd0) - (r_done ? 4'd1 : 4'd0);
+
+                // Write handshakes
+                if (mem_wr_valid && !wr_aw_sent && !wr_b_wait && !m_axi_awvalid) begin
+                    m_axi_awvalid <= 1'b1;
+                    m_axi_awaddr  <= base_addr + (AXI_ADDR_W'(mem_wr_addr) << 10);
+                end
+                if (m_axi_awvalid && m_axi_awready) begin
+                    m_axi_awvalid <= 1'b0;
+                    wr_aw_sent    <= 1'b1;
+                end
+                if (m_axi_wvalid && m_axi_wready && m_axi_wlast) begin
+                    wr_aw_sent <= 1'b0;
+                    wr_b_wait  <= 1'b1;
+                end
+                if (m_axi_bvalid && m_axi_bready)
+                    wr_b_wait <= 1'b0;
             end
-            if (m_axi_bvalid && m_axi_bready)
-                wr_b_wait <= 1'b0;
         end
     end
+
 endmodule

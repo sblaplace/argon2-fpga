@@ -124,6 +124,7 @@ perf-all: perf
 	$(MAKE) PERF_TYPE=2 perf
 
 ifeq ($(SIM),verilator)
+
 run-tb_p4_perf: tb_p4_perf.sv tb_ddr4_ram.sv
 	@rm -rf $(OBJ)/tb_p4_perf
 	@mkdir -p $(OBJ)/tb_p4_perf
@@ -191,7 +192,7 @@ ifeq ($(SIM),verilator)
 # precompiled-header config that does not match a stock g++, so compile the
 # generated model here with PCH used as a plain -include.
 VFLAGS := --timing -Wno-WIDTH -Wno-fatal -I$(INCDIR) -GN_P=$(NP)
-VCXXFLAGS := -Os --std=c++20 -fcoroutines -DVL_TIME_CONTEXT
+VCXXFLAGS := -O1 --std=c++20 -fcoroutines -DVL_TIME_CONTEXT
 
 run-%: %.sv
 	@rm -rf $(OBJ)/$*

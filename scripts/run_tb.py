@@ -117,6 +117,7 @@ def run_sim_suite():
     ok = True
     if not os.path.isdir(SIM_DIR):
         return ok
+    sim_env = os.environ.get("SIM")
     # One make per (bench, N_P): a compile error, missing-PASS, or stall is
     # attributed to the exact (bench, N_P), and a stall can't block the rest
     # of the job for more than the per-target timeout. (A bare `make -C sim`
@@ -124,8 +125,11 @@ def run_sim_suite():
     # default goal.) N_P comes via the Makefile `NP` var (-> -PN_P).
     for np in N_P_MATRIX:
         for tgt in SIM_TARGETS:
+            cmd = ["make", "-C", SIM_DIR, tgt, f"NP={np}"]
+            if sim_env:
+                cmd.append(f"SIM={sim_env}")
             ok &= run_streaming(
-                ["make", "-C", SIM_DIR, tgt, f"NP={np}"], cwd=ROOT,
+                cmd, cwd=ROOT,
                 timeout=PER_TARGET_TIMEOUT,
                 label=f"sim: make -C sim {tgt} (N_P={np})", require_pass=True,
             )
