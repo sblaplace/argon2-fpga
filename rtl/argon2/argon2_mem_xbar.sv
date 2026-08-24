@@ -35,8 +35,8 @@
 //
 // Lane-port contract:
 //   1. A read request is ACCEPTED THE CYCLE IT IS OFFERED whenever the
-//      lane's request slot is empty (`!q_valid[i]`), decoupling the lane
-//      from channel arbitration.
+//      lane's request slot is empty and lane i has no in-flight burst
+//      (`!q_valid[i] && !lbusy[i]`), decoupling the lane from channel arbitration.
 //   2. A lane has ONE read stream: a queued request of lane i is not
 //      issued to any channel while a burst tagged to lane i is still in
 //      flight on any channel (`lbusy[i]`), ensuring responses from different
@@ -86,9 +86,6 @@ module argon2_mem_xbar #(
     output logic [LANES-1:0][511:0]      c_wr_data,
     output logic [LANES-1:0]             c_wr_last
 );
-    localparam int OW = (LANES > 1) ? $clog2(LANES) : 1;
-    localparam int PW = (MAX_INFLIGHT > 1) ? $clog2(MAX_INFLIGHT) : 1;
-
     // ---- write path: lane i -> channel i, global -> local index ---------
     for (genvar i = 0; i < LANES; i++) begin : g_wr
         assign c_wr_valid[i] = l_wr_valid[i];
@@ -102,23 +99,23 @@ module argon2_mem_xbar #(
     // ---- read path: per-lane 1-deep request queue -----------------------
     logic [LANES-1:0]  q_valid;
     logic [ADDR_W-1:0] q_addr  [0:LANES-1];
-    logic [OW-1:0]     q_owner [0:LANES-1];
+    logic [3:0]        q_owner [0:LANES-1];
 
     for (genvar i = 0; i < LANES; i++) begin : g_q
         assign l_rd_ready[i] = !q_valid[i] && !lbusy[i];
     end
 
     // ---- per-channel in-flight tag FIFO & command register --------------
-    logic [OW-1:0]             tag_fifo [0:LANES-1][0:MAX_INFLIGHT-1];
-    logic [MAX_INFLIGHT-1:0]   tag_v    [0:LANES-1];
-    logic [PW-1:0]             tag_wr_ptr [0:LANES-1];
-    logic [PW-1:0]             tag_rd_ptr [0:LANES-1];
-    logic [3:0]                tag_cnt    [0:LANES-1];
+    logic [3:0] tag_fifo   [0:LANES-1][0:MAX_INFLIGHT-1];
+    logic       tag_v      [0:LANES-1][0:MAX_INFLIGHT-1];
+    logic [3:0] tag_wr_ptr [0:LANES-1];
+    logic [3:0] tag_rd_ptr [0:LANES-1];
+    logic [3:0] tag_cnt    [0:LANES-1];
 
-    logic                      cmd_valid [0:LANES-1];
-    logic [ADDR_W-1:0]         cmd_addr  [0:LANES-1];
-    logic [OW-1:0]             cmd_tag   [0:LANES-1];
-    logic [OW-1:0]             rr        [0:LANES-1];   // round-robin pointer
+    logic              cmd_valid [0:LANES-1];
+    logic [ADDR_W-1:0] cmd_addr  [0:LANES-1];
+    logic [3:0]        cmd_tag   [0:LANES-1];
+    logic [3:0]        rr        [0:LANES-1];   // round-robin pointer
 
     // lbusy[i]: a burst tagged to lane i is commanding or returning on some
     // channel. A queued request of lane i must not be issued until lbusy[i]
@@ -129,10 +126,10 @@ module argon2_mem_xbar #(
             lbusy[i] = 1'b0;
             for (int c = 0; c < LANES; c++) begin
                 for (int e = 0; e < MAX_INFLIGHT; e++) begin
-                    if (tag_v[c][e] && (tag_fifo[c][e] == OW'(i)))
+                    if (tag_v[c][e] && (tag_fifo[c][e] == 4'(i)))
                         lbusy[i] = 1'b1;
                 end
-                if (cmd_valid[c] && (cmd_tag[c] == OW'(i)))
+                if (cmd_valid[c] && (cmd_tag[c] == 4'(i)))
                     lbusy[i] = 1'b1;
             end
         end
@@ -155,7 +152,7 @@ module argon2_mem_xbar #(
         for (int c = 0; c < LANES; c++) begin
             for (int i = 0; i < LANES; i++)
                 cand[c*LANES + i] = q_valid[i] && !lbusy[i]
-                                    && (32'(q_owner[i]) == 32'(c));
+                                    && (q_owner[i] == 4'(c));
             cv = cand[c*LANES +: LANES];
             rot_mask = xrot(cv, int'(rr[c])) & (~xrot(cv, int'(rr[c])) + 1'b1);
             grant[c*LANES +: LANES] = xrot(rot_mask, LANES - int'(rr[c]));
@@ -175,7 +172,7 @@ module argon2_mem_xbar #(
             l_rd_last[i]   = 1'b0;
             l_rd_data[i]   = '0;
             for (int c = 0; c < LANES; c++) begin
-                if (tag_v[c][tag_rd_ptr[c]] && (tag_fifo[c][tag_rd_ptr[c]] == OW'(i))) begin
+                if (tag_v[c][tag_rd_ptr[c]] && (tag_fifo[c][tag_rd_ptr[c]] == 4'(i))) begin
                     l_rd_data_v[i] = c_rd_data_v[c];
                     l_rd_last[i]   = c_rd_last[c];
                     l_rd_data[i]   = c_rd_data[c];
@@ -192,7 +189,6 @@ module argon2_mem_xbar #(
                 q_owner[i] <= '0;
             end
             for (int c = 0; c < LANES; c++) begin
-                tag_v[c]      <= '0;
                 tag_wr_ptr[c] <= '0;
                 tag_rd_ptr[c] <= '0;
                 tag_cnt[c]    <= '0;
@@ -200,8 +196,10 @@ module argon2_mem_xbar #(
                 cmd_addr[c]   <= '0;
                 cmd_tag[c]    <= '0;
                 rr[c]         <= '0;
-                for (int e = 0; e < MAX_INFLIGHT; e++)
+                for (int e = 0; e < MAX_INFLIGHT; e++) begin
+                    tag_v[c][e]    <= 1'b0;
                     tag_fifo[c][e] <= '0;
+                end
             end
         end else begin
             // Queue fill (lane-side handshake)
@@ -209,7 +207,7 @@ module argon2_mem_xbar #(
                 if (l_rd_valid[i] && l_rd_ready[i]) begin
                     q_valid[i] <= 1'b1;
                     q_addr[i]  <= l_rd_addr[i];
-                    q_owner[i] <= l_rd_owner[i][OW-1:0];
+                    q_owner[i] <= l_rd_owner[i];
                 end
             end
 
@@ -222,14 +220,14 @@ module argon2_mem_xbar #(
                 // Advance response pointer when current burst finishes
                 if (resp_done) begin
                     tag_v[c][tag_rd_ptr[c]] <= 1'b0;
-                    tag_rd_ptr[c] <= (tag_rd_ptr[c] == PW'(MAX_INFLIGHT - 1)) ? '0 : (tag_rd_ptr[c] + 1'b1);
+                    tag_rd_ptr[c] <= (tag_rd_ptr[c] == 4'(MAX_INFLIGHT - 1)) ? 4'd0 : (tag_rd_ptr[c] + 4'd1);
                 end
 
                 // Push tag into in-flight FIFO when memory accepts command
                 if (cmd_accepted) begin
                     tag_fifo[c][tag_wr_ptr[c]] <= cmd_tag[c];
                     tag_v[c][tag_wr_ptr[c]]    <= 1'b1;
-                    tag_wr_ptr[c] <= (tag_wr_ptr[c] == PW'(MAX_INFLIGHT - 1)) ? '0 : (tag_wr_ptr[c] + 1'b1);
+                    tag_wr_ptr[c] <= (tag_wr_ptr[c] == 4'(MAX_INFLIGHT - 1)) ? 4'd0 : (tag_wr_ptr[c] + 4'd1);
                     cmd_valid[c]  <= 1'b0;
                 end
 
@@ -242,10 +240,10 @@ module argon2_mem_xbar #(
                         for (int k = LANES-1; k >= 0; k--) begin
                             if (grant[c*LANES + k]) begin
                                 cmd_valid[c] <= 1'b1;
-                                cmd_tag[c]   <= OW'(k);
+                                cmd_tag[c]   <= 4'(k);
                                 cmd_addr[c]  <= ADDR_W'(64'(q_addr[k]) - 64'(c) * 64'(lane_length));
                                 q_valid[k]   <= 1'b0;   // pop lane queue
-                                rr[c]        <= OW'((32'(k) + 32'd1) % LANES);
+                                rr[c]        <= 4'((32'(k) + 32'd1) % LANES);
                             end
                         end
                     end
