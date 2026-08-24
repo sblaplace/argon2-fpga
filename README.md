@@ -140,6 +140,10 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
 - [ ] Add an owner-channel read crossbar before enabling a single p>1 job
       across physically partitioned memories; Argon2 references other lanes,
       so a barrier alone is insufficient.
+- [ ] **HBM4/custom-package architecture:** define the many-context,
+      bank-aware memory fabric and ASIC scaling target. The design proposal,
+      bandwidth model, tagged block interface, and staged implementation plan
+      are in [`docs/HBM4_ARCHITECTURE.md`](docs/HBM4_ARCHITECTURE.md).
 
 ## Tree
 
