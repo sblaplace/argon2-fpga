@@ -20,6 +20,11 @@ module tb_argon2_block_fabric;
     logic [RQ-1:0][15:0] rsp_context, rsp_request;
     logic [RQ-1:0][3:0] rsp_beat;
     logic [RQ-1:0][DW-1:0] rsp_data;
+    logic [RQ-1:0] wr_ready, wr_valid, wr_last;
+    logic [RQ-1:0][15:0] wr_context;
+    logic [RQ-1:0][31:0] wr_block_addr;
+    logic [RQ-1:0][3:0] wr_beat;
+    logic [RQ-1:0][DW-1:0] wr_data;
 
     logic [PP-1:0] mem_rd_valid, mem_rd_ready;
     logic [PP-1:0][15:0] mem_rd_context;
@@ -27,6 +32,11 @@ module tb_argon2_block_fabric;
     logic [PP-1:0] mem_data_valid, mem_data_ready, mem_data_last, mem_data_error;
     logic [PP-1:0][3:0] mem_data_beat;
     logic [PP-1:0][DW-1:0] mem_data;
+    logic [PP-1:0] mem_wr_valid, mem_wr_ready, mem_wr_last;
+    logic [PP-1:0][15:0] mem_wr_context;
+    logic [PP-1:0][31:0] mem_wr_block_addr;
+    logic [PP-1:0][3:0] mem_wr_beat;
+    logic [PP-1:0][DW-1:0] mem_wr_data;
 
     logic [PP-1:0] pending;
     logic [PP-1:0][2:0] delay;
@@ -45,6 +55,9 @@ module tb_argon2_block_fabric;
         .rd_ready(rd_ready), .rd_valid(rd_valid),
         .rd_context(rd_context), .rd_request(rd_request),
         .rd_block_addr(rd_block_addr),
+        .wr_ready(wr_ready), .wr_valid(wr_valid),
+        .wr_context(wr_context), .wr_block_addr(wr_block_addr),
+        .wr_beat(wr_beat), .wr_last(wr_last), .wr_data(wr_data),
         .rsp_valid(rsp_valid), .rsp_ready(rsp_ready),
         .rsp_context(rsp_context), .rsp_request(rsp_request),
         .rsp_beat(rsp_beat), .rsp_last(rsp_last), .rsp_data(rsp_data),
@@ -53,7 +66,10 @@ module tb_argon2_block_fabric;
         .mem_rd_context(mem_rd_context), .mem_rd_block_addr(mem_rd_block_addr),
         .mem_data_valid(mem_data_valid), .mem_data_ready(mem_data_ready),
         .mem_data_beat(mem_data_beat), .mem_data_last(mem_data_last),
-        .mem_data(mem_data), .mem_data_error(mem_data_error)
+        .mem_data(mem_data), .mem_data_error(mem_data_error),
+        .mem_wr_valid(mem_wr_valid), .mem_wr_ready(mem_wr_ready),
+        .mem_wr_context(mem_wr_context), .mem_wr_block_addr(mem_wr_block_addr),
+        .mem_wr_beat(mem_wr_beat), .mem_wr_last(mem_wr_last), .mem_wr_data(mem_wr_data)
     );
 
     function automatic [511:0] expected_data(
@@ -159,6 +175,13 @@ module tb_argon2_block_fabric;
         rd_context = '0;
         rd_request = '0;
         rd_block_addr = '0;
+        wr_valid = '0;
+        wr_context = '0;
+        wr_block_addr = '0;
+        wr_beat = '0;
+        wr_last = '0;
+        wr_data = '0;
+        mem_wr_ready = '1;
         got = 0;
         repeat (4) @(posedge clk);
         rst_n = 1'b1;

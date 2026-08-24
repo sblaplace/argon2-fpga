@@ -47,6 +47,16 @@ module argon2_block_fabric #(
     output logic [REQUESTERS-1:0][DATA_W-1:0]             rsp_data,
     output logic [REQUESTERS-1:0]                         rsp_error,
 
+    // Requester-side write stream. Beats of one block must be presented in
+    // order; the fabric may arbitrate different requesters independently.
+    output logic [REQUESTERS-1:0]                         wr_ready,
+    input  logic [REQUESTERS-1:0]                         wr_valid,
+    input  logic [REQUESTERS-1:0][CONTEXT_W-1:0]          wr_context,
+    input  logic [REQUESTERS-1:0][ADDR_W-1:0]             wr_block_addr,
+    input  logic [REQUESTERS-1:0][BEAT_W-1:0]             wr_beat,
+    input  logic [REQUESTERS-1:0]                         wr_last,
+    input  logic [REQUESTERS-1:0][DATA_W-1:0]             wr_data,
+
     // Partition side.  A partition memory must return beats in order for
     // the accepted command, and assert data_last on beat 15.
     output logic [PARTITIONS-1:0]                         mem_rd_valid,
@@ -58,7 +68,15 @@ module argon2_block_fabric #(
     input  logic [PARTITIONS-1:0][BEAT_W-1:0]             mem_data_beat,
     input  logic [PARTITIONS-1:0]                         mem_data_last,
     input  logic [PARTITIONS-1:0][DATA_W-1:0]             mem_data,
-    input  logic [PARTITIONS-1:0]                         mem_data_error
+    input  logic [PARTITIONS-1:0]                         mem_data_error,
+
+    output logic [PARTITIONS-1:0]                         mem_wr_valid,
+    input  logic [PARTITIONS-1:0]                         mem_wr_ready,
+    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]          mem_wr_context,
+    output logic [PARTITIONS-1:0][ADDR_W-1:0]             mem_wr_block_addr,
+    output logic [PARTITIONS-1:0][BEAT_W-1:0]             mem_wr_beat,
+    output logic [PARTITIONS-1:0]                         mem_wr_last,
+    output logic [PARTITIONS-1:0][DATA_W-1:0]             mem_wr_data
 );
     localparam int PART_W = (PARTITIONS <= 1) ? 1 : $clog2(PARTITIONS);
 
@@ -121,8 +139,18 @@ module argon2_block_fabric #(
     // one-hot pointer prevents a permanently ready low-numbered requester
     // from starving other contexts.
     logic [PARTITIONS-1:0][REQUESTERS-1:0] grant;
+    logic [PARTITIONS-1:0][REQUESTERS-1:0] wr_grant;
+    logic [PARTITIONS-1:0][REQUESTERS-1:0] wr_rr_onehot;
     always_comb begin
         grant = '0;
+        wr_grant = '0;
+        wr_ready = '0;
+        mem_wr_valid = '0;
+        mem_wr_context = '0;
+        mem_wr_block_addr = '0;
+        mem_wr_beat = '0;
+        mem_wr_last = '0;
+        mem_wr_data = '0;
         for (int p = 0; p < PARTITIONS; p++) begin
             logic found;
             found = 1'b0;
@@ -133,6 +161,24 @@ module argon2_block_fabric #(
                     (map_partition(q_context[r], q_addr[r]) == p) begin
                     grant[p][r] = 1'b1;
                     found = 1'b1;
+                end
+            end
+
+            found = 1'b0;
+            for (int off = 0; off < REQUESTERS; off++) begin
+                int r;
+                r = (wr_rr_onehot[p] + off) % REQUESTERS;
+                if (!found && wr_valid[r] &&
+                    (map_partition(wr_context[r], wr_block_addr[r]) == p)) begin
+                    wr_grant[p][r] = 1'b1;
+                    found = 1'b1;
+                    mem_wr_valid[p] = 1'b1;
+                    mem_wr_context[p] = wr_context[r];
+                    mem_wr_block_addr[p] = map_local_addr(wr_block_addr[r]);
+                    mem_wr_beat[p] = wr_beat[r];
+                    mem_wr_last[p] = wr_last[r];
+                    mem_wr_data[p] = wr_data[r];
+                    wr_ready[r] = mem_wr_ready[p];
                 end
             end
         end
@@ -176,6 +222,7 @@ module argon2_block_fabric #(
             active        <= '0;
             active_owner  <= '0;
             rr_onehot     <= '0;
+            wr_rr_onehot  <= '0;
             for (int r = 0; r < REQUESTERS; r++) begin
                 q_context[r] <= '0;
                 q_request[r] <= '0;
@@ -187,8 +234,10 @@ module argon2_block_fabric #(
                 cmd_addr[p]      <= '0;
                 active_context[p] <= '0;
                 active_request[p] <= '0;
-                if (p < REQUESTERS)
+                if (p < REQUESTERS) begin
                     rr_onehot[p] <= {{(REQUESTERS-1){1'b0}}, 1'b1};
+                    wr_rr_onehot[p] <= {{(REQUESTERS-1){1'b0}}, 1'b1};
+                end
             end
         end else begin
             for (int r = 0; r < REQUESTERS; r++) begin
@@ -233,6 +282,13 @@ module argon2_block_fabric #(
                     active[p]         <= 1'b1;
                     active_context[p] <= cmd_context[p];
                     active_request[p] <= cmd_request[p];
+                end
+
+                for (int r = 0; r < REQUESTERS; r++) begin
+                    if (wr_grant[p][r] && mem_wr_ready[p])
+                        wr_rr_onehot[p] <= (r == REQUESTERS-1) ?
+                                           {{(REQUESTERS-1){1'b0}}, 1'b1} :
+                                           ({{(REQUESTERS-1){1'b0}}, 1'b1} << (r + 1));
                 end
             end
         end
