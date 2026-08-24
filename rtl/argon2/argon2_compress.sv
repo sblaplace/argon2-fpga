@@ -121,6 +121,7 @@ module argon2_compress #(
             int g;
             int c;
             g = group + w;
+            c = 0;
             pv = 1024'd0;
             if (g < 8) begin
                 for (int i2 = 0; i2 < 16; i2 = i2 + 1)
@@ -204,6 +205,7 @@ module argon2_compress #(
                             int c;
                             q = p_out[w];
                             g = group + w;
+                            c = 0;
                             // P results go back into the compute buffer.
                             if (g < 8) begin
                                 for (int i2 = 0; i2 < 16; i2 = i2 + 1)
