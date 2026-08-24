@@ -112,6 +112,7 @@ FABRIC_RQ  ?= 32
 FABRIC_PP  ?= 32
 FABRIC_LAT ?= 20
 FABRIC_BANKS ?= 16
+FABRIC_TURN ?= 4
 
 SRC_tb_p4_perf := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_fill_job.sv \
@@ -237,7 +238,7 @@ ifeq ($(SIM),verilator)
 run-tb_hbm_fabric_perf: tb_hbm_fabric_perf.sv
 	@rm -rf $(OBJ)/tb_hbm_fabric_perf
 	@mkdir -p $(OBJ)/tb_hbm_fabric_perf
-	$(VERILATOR) $(VFLAGS) -GREQUESTERS=$(FABRIC_RQ) -GPARTITIONS=$(FABRIC_PP) -GREAD_LAT=$(FABRIC_LAT) -GBANKS=$(FABRIC_BANKS) --Mdir $(OBJ)/tb_hbm_fabric_perf --main --exe --cc -o tb_hbm_fabric_perf tb_hbm_fabric_perf.sv $(SRC_tb_hbm_fabric_perf) --top-module tb_hbm_fabric_perf
+	$(VERILATOR) $(VFLAGS) -GREQUESTERS=$(FABRIC_RQ) -GPARTITIONS=$(FABRIC_PP) -GREAD_LAT=$(FABRIC_LAT) -GBANKS=$(FABRIC_BANKS) -GRW_TURNAROUND=$(FABRIC_TURN) --Mdir $(OBJ)/tb_hbm_fabric_perf --main --exe --cc -o tb_hbm_fabric_perf tb_hbm_fabric_perf.sv $(SRC_tb_hbm_fabric_perf) --top-module tb_hbm_fabric_perf
 	@ln -sf Vtb_hbm_fabric_perf__pch.h $(OBJ)/tb_hbm_fabric_perf/Vtb_hbm_fabric_perf__pch.h.fast
 	@ln -sf Vtb_hbm_fabric_perf__pch.h $(OBJ)/tb_hbm_fabric_perf/Vtb_hbm_fabric_perf__pch.h.slow
 	@$(MAKE) -s -C $(OBJ)/tb_hbm_fabric_perf -f Vtb_hbm_fabric_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
@@ -247,7 +248,7 @@ run-tb_hbm_fabric_perf: tb_hbm_fabric_perf.out
 	$(VVP) $<
 
 tb_hbm_fabric_perf.out: tb_hbm_fabric_perf.sv $(SRC_tb_hbm_fabric_perf)
-	$(IVERILOG) -g2012 -Ptb_hbm_fabric_perf.REQUESTERS=$(FABRIC_RQ) -Ptb_hbm_fabric_perf.PARTITIONS=$(FABRIC_PP) -Ptb_hbm_fabric_perf.READ_LAT=$(FABRIC_LAT) -Ptb_hbm_fabric_perf.BANKS=$(FABRIC_BANKS) -I$(INCDIR) -o $@ $< $(SRC_tb_hbm_fabric_perf)
+	$(IVERILOG) -g2012 -Ptb_hbm_fabric_perf.REQUESTERS=$(FABRIC_RQ) -Ptb_hbm_fabric_perf.PARTITIONS=$(FABRIC_PP) -Ptb_hbm_fabric_perf.READ_LAT=$(FABRIC_LAT) -Ptb_hbm_fabric_perf.BANKS=$(FABRIC_BANKS) -Ptb_hbm_fabric_perf.RW_TURNAROUND=$(FABRIC_TURN) -I$(INCDIR) -o $@ $< $(SRC_tb_hbm_fabric_perf)
 endif
 
 # Top-level F1 CL bench: instantiate cl_argon2 with 4 behavioral DDR RAMs
