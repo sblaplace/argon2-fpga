@@ -230,7 +230,7 @@ endif
 hbmperf-sweep:
 	@for p in 8 16 32; do \
 		echo "== fabric partitions=$$p requesters=$$p =="; \
-		$(MAKE) --no-print-directory hbmperf FABRIC_PP=$$p FABRIC_RQ=$$p; \
+		$(MAKE) --no-print-directory -B hbmperf FABRIC_PP=$$p FABRIC_RQ=$$p; \
 	done
 
 ifeq ($(SIM),verilator)
