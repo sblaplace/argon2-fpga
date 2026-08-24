@@ -268,6 +268,9 @@ cand/s. Peak HBM bandwidth alone is not a result.
 ## Immediate implementation sequence
 
 1. Extract a generic tagged block-memory interface from `argon2_fill_axi`.
+   The first RTL baseline is now `rtl/argon2/argon2_block_fabric.sv`: it
+   provides tagged 1 KiB reads, 16-beat response routing, rotating
+   per-partition arbitration, and a reversible power-of-two block mapping.
 2. Build a parameterized `argon2_mem_fabric` behavioral model with 1, 4, 8,
    and 32 partitions.
 3. Add a context scheduler around the existing `argon2_fill_ctrl`.
