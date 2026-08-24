@@ -60,6 +60,9 @@ SRC_tb_argon2_p4 := \
 	$(RTL)/argon2/argon2_fill_job.sv \
 	$(RTL)/argon2/argon2_mem_xbar.sv
 
+# Tagged multi-partition block fabric baseline (HBM-scale architecture).
+SRC_tb_argon2_block_fabric := $(RTL)/argon2/argon2_block_fabric.sv
+
 # ---- F1 CL top-level bench ------------------------------------------------
 F1DES := ../fpga/f1/design
 
@@ -162,10 +165,10 @@ p4perf250: tb_p4_perf.out
 	$(VVP) $<
 endif
 
-.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 axi axibig sweep cl perf p4perf perf250 perf-all vectors clean
+.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 fabric axi axibig sweep cl perf p4perf perf250 perf-all vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
-all: blake2b blamka index compress addr fill discipline rfc p4 axi axibig sweep
+all: blake2b blamka index compress addr fill discipline rfc p4 fabric axi axibig sweep
 
 vectors: $(GEN)/fill_i_init.hex
 
@@ -182,6 +185,7 @@ fill:    vectors run-tb_argon2_fill
 discipline: vectors run-tb_argon2_fill_discipline
 rfc:     vectors run-tb_argon2_fill_rfc
 p4:      vectors run-tb_argon2_p4
+fabric:  run-tb_argon2_block_fabric
 axi:     vectors run-tb_argon2_axi
 axibig:  vectors run-tb_argon2_axi_big
 sweep:   vectors run-tb_argon2_axi_sweep
