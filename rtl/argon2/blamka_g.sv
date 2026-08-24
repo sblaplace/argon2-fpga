@@ -39,15 +39,7 @@ module blamka_g (
     logic [63:0] c_s [0:3];
     logic [63:0] d_s [0:3];
     logic [3:0]  vpipe;
-
-    // One multiply per quarter — reuse the fbla result for the xor/rot
-    // instead of recomputing it. Halves DSP usage (4 → 2? actually 8 → 4
-    // per GB before) and shortens the critical path.
     logic [63:0] f0, f1, f2, f3;
-    assign f0 = fbla(a_i, b_i);
-    assign f1 = fbla(c_s[0], d_s[0]);
-    assign f2 = fbla(a_s[1], b_s[1]);
-    assign f3 = fbla(c_s[2], d_s[2]);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -70,6 +62,14 @@ module blamka_g (
             c_s[2]    <= 64'd0;
             d_s[2]    <= 64'd0;
         end else begin
+            // One multiply per quarter — reuse result for xor/rot.
+            // Halves DSP usage (8->4 mults/GB). Blocking temps read old
+            // register values (non-blocking updates not yet visible).
+            f0 = fbla(a_i, b_i);
+            f1 = fbla(c_s[0], d_s[0]);
+            f2 = fbla(a_s[1], b_s[1]);
+            f3 = fbla(c_s[2], d_s[2]);
+
             vpipe <= {vpipe[2:0], in_valid};
 
             // Q0: a += b + 2ab_lo; d = ror32(d ⊕ a)
