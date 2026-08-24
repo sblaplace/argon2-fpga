@@ -107,6 +107,12 @@ P4_NP   ?= 1
 P4_TYPE ?= 1
 P4_MHZ  ?= 200
 
+# HBM-like fabric model knobs.
+FABRIC_RQ  ?= 32
+FABRIC_PP  ?= 32
+FABRIC_LAT ?= 20
+FABRIC_BANKS ?= 16
+
 SRC_tb_p4_perf := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_fill_job.sv \
 	$(RTL)/argon2/argon2_mem_xbar.sv \
@@ -166,7 +172,7 @@ p4perf250: tb_p4_perf.out
 	$(VVP) $<
 endif
 
-.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 fabric hbmperf axi axibig sweep cl perf p4perf perf250 perf-all vectors clean
+.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 fabric hbmperf hbmperf-sweep axi axibig sweep cl perf p4perf perf250 perf-all vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
 all: blake2b blamka index compress addr fill discipline rfc p4 fabric axi axibig sweep
@@ -217,6 +223,31 @@ run-%: %.out
 %.out: %.sv
 	$(IVERILOG) -g2012 -PN_P=$(NP) -I$(INCDIR) -o $@ $< $(SRC_$*)
 
+endif
+
+# HBM-like fabric sweep target. The compile is parameterized separately from
+# the generic run-% rule so changing FABRIC_PP really rebuilds the top.
+hbmperf-sweep:
+	@for p in 8 16 32; do \
+		echo "== fabric partitions=$$p requesters=$$p =="; \
+		$(MAKE) --no-print-directory hbmperf FABRIC_PP=$$p FABRIC_RQ=$$p; \
+	done
+
+ifeq ($(SIM),verilator)
+run-tb_hbm_fabric_perf: tb_hbm_fabric_perf.sv
+	@rm -rf $(OBJ)/tb_hbm_fabric_perf
+	@mkdir -p $(OBJ)/tb_hbm_fabric_perf
+	$(VERILATOR) $(VFLAGS) -GREQUESTERS=$(FABRIC_RQ) -GPARTITIONS=$(FABRIC_PP) -GREAD_LAT=$(FABRIC_LAT) -GBANKS=$(FABRIC_BANKS) --Mdir $(OBJ)/tb_hbm_fabric_perf --main --exe --cc -o tb_hbm_fabric_perf tb_hbm_fabric_perf.sv $(SRC_tb_hbm_fabric_perf) --top-module tb_hbm_fabric_perf
+	@ln -sf Vtb_hbm_fabric_perf__pch.h $(OBJ)/tb_hbm_fabric_perf/Vtb_hbm_fabric_perf__pch.h.fast
+	@ln -sf Vtb_hbm_fabric_perf__pch.h $(OBJ)/tb_hbm_fabric_perf/Vtb_hbm_fabric_perf__pch.h.slow
+	@$(MAKE) -s -C $(OBJ)/tb_hbm_fabric_perf -f Vtb_hbm_fabric_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
+	./$(OBJ)/tb_hbm_fabric_perf/tb_hbm_fabric_perf
+else
+run-tb_hbm_fabric_perf: tb_hbm_fabric_perf.out
+	$(VVP) $<
+
+tb_hbm_fabric_perf.out: tb_hbm_fabric_perf.sv $(SRC_tb_hbm_fabric_perf)
+	$(IVERILOG) -g2012 -Ptb_hbm_fabric_perf.REQUESTERS=$(FABRIC_RQ) -Ptb_hbm_fabric_perf.PARTITIONS=$(FABRIC_PP) -Ptb_hbm_fabric_perf.READ_LAT=$(FABRIC_LAT) -Ptb_hbm_fabric_perf.BANKS=$(FABRIC_BANKS) -I$(INCDIR) -o $@ $< $(SRC_tb_hbm_fabric_perf)
 endif
 
 # Top-level F1 CL bench: instantiate cl_argon2 with 4 behavioral DDR RAMs

@@ -14,6 +14,8 @@ module tb_hbm_fabric_perf #(
     parameter int REQUESTERS = 32,
     parameter int PARTITIONS = 32,
     parameter int READ_LAT   = 20,
+    parameter int BANKS      = 16,
+    parameter int BANK_PENALTY = 3,
     parameter int CYCLES     = 100000
 );
     localparam int DW = 512;
@@ -51,7 +53,8 @@ module tb_hbm_fabric_perf #(
     logic [PARTITIONS-1:0] read_pending;
     integer read_delay [0:PARTITIONS-1];
     logic [PARTITIONS-1:0][3:0] read_beat;
-    integer cycles, blocks_done, rd_cmds, wr_beats, wr_stalls;
+    integer cycles, blocks_done, rd_cmds, wr_beats, wr_stalls, bank_stalls;
+    integer bank_wait [0:PARTITIONS-1][0:BANKS-1];
 
     always #5 clk = ~clk;
 
@@ -84,7 +87,7 @@ module tb_hbm_fabric_perf #(
     // returns zero data because this bench measures transport, not Argon2.
     always_comb begin
         rsp_ready = '1;
-        mem_rd_ready = '1;
+        mem_rd_ready = '0;
         mem_data_valid = '0;
         mem_data_ready = '0;
         mem_data_beat = read_beat;
@@ -97,10 +100,12 @@ module tb_hbm_fabric_perf #(
         end
         // A repeating write-ready pattern approximates controller queue
         // pressure while remaining deterministic and reproducible.
-        for (int p = 0; p < PARTITIONS; p++)
-            mem_wr_ready[p] = ((cycles + p * 3) % 11) != 0;
-        for (int p = 0; p < PARTITIONS; p++)
+        for (int p = 0; p < PARTITIONS; p++) begin
+            mem_rd_ready[p] = (bank_wait[p][mem_rd_block_addr[p] % BANKS] == 0);
+            mem_wr_ready[p] = ((cycles + p * 3) % 11) != 0 &&
+                              (bank_wait[p][mem_wr_block_addr[p] % BANKS] == 0);
             mem_data_ready[p] = mem_data_valid[p];
+        end
     end
 
     always_comb begin
@@ -128,10 +133,13 @@ module tb_hbm_fabric_perf #(
             rd_cmds <= 0;
             wr_beats <= 0;
             wr_stalls <= 0;
+            bank_stalls <= 0;
             cycles <= 0;
             for (int p = 0; p < PARTITIONS; p++) begin
                 read_delay[p] <= 0;
                 read_beat[p] <= '0;
+                for (int b = 0; b < BANKS; b++)
+                    bank_wait[p][b] <= 0;
             end
         end else begin
             cycles <= cycles + 1;
@@ -141,6 +149,7 @@ module tb_hbm_fabric_perf #(
                 $display("HBM fabric: %0.3f aggregate read blocks/cycle, %0.3f write GB/s at 1 GHz-equivalent",
                          blocks_done * 1.0 / (cycles != 0 ? cycles : 1),
                          wr_beats * 64.0 / (cycles != 0 ? cycles : 1));
+                $display("HBM fabric: %0d bank-conflict stalls (BANKS=%0d, penalty=%0d)", bank_stalls, BANKS, BANK_PENALTY);
                 $finish;
             end
 
@@ -164,10 +173,17 @@ module tb_hbm_fabric_perf #(
             end
 
             for (int p = 0; p < PARTITIONS; p++) begin
+                for (int b = 0; b < BANKS; b++)
+                    if (bank_wait[p][b] > 0) bank_wait[p][b] <= bank_wait[p][b] - 1;
+                if (mem_rd_valid[p] && !mem_rd_ready[p])
+                    bank_stalls = bank_stalls + 1;
+                if (mem_wr_valid[p] && !mem_wr_ready[p])
+                    bank_stalls = bank_stalls + 1;
                 if (mem_rd_valid[p] && mem_rd_ready[p]) begin
                     read_pending[p] <= 1'b1;
                     read_delay[p] <= READ_LAT;
                     read_beat[p] <= '0;
+                    bank_wait[p][mem_rd_block_addr[p] % BANKS] <= BANK_PENALTY;
                 end else if (read_pending[p] && read_delay[p] > 0) begin
                     read_delay[p] <= read_delay[p] - 1;
                 end else if (read_pending[p] && mem_data_valid[p] &&
@@ -177,6 +193,8 @@ module tb_hbm_fabric_perf #(
                              mem_data_ready[p]) begin
                     read_beat[p] <= read_beat[p] + 1'b1;
                 end
+                if (mem_wr_valid[p] && mem_wr_ready[p])
+                    bank_wait[p][mem_wr_block_addr[p] % BANKS] <= BANK_PENALTY;
             end
         end
     end

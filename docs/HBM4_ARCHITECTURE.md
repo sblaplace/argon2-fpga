@@ -275,7 +275,9 @@ cand/s. Peak HBM bandwidth alone is not a result.
 2. Build a parameterized `argon2_mem_fabric` behavioral model with 1, 4, 8,
    and 32 partitions. The first timing model is available as
    `sim/tb_hbm_fabric_perf.sv` and runs with `make -C sim hbmperf`; it models
-   independent partition read latency and deterministic write backpressure.
+   independent partition read latency, bank cooldown/conflicts, and
+   deterministic write backpressure. `make -C sim hbmperf-sweep` runs 8, 16,
+   and 32 partition points.
 3. Add a context scheduler around the existing `argon2_fill_ctrl`.
 4. Reuse `argon2_mem_xbar` for the first `p=4` implementation.
 5. Add a cycle-accurate HBM-like timing model and a `cand/s` sweep bench.
