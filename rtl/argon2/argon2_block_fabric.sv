@@ -17,10 +17,10 @@
 // block granularity avoids coupling the Argon2 controller to an HBM burst
 // width or PHY.
 //
-// Multi-bit payload busses are declared as unpacked arrays (like the blake2b
-// modules) because the per-partition / per-requester state is indexed by
-// loop variables everywhere; Icarus cannot elaborate variable part-selects
-// on packed 2-D arrays.
+// Ports are packed 2-D busses (like argon2_mem_xbar).  Per-requester /
+// per-partition STATE is held in unpacked arrays, because that state is
+// indexed by loop variables everywhere and Icarus cannot elaborate variable
+// part-selects on packed 2-D arrays in condition/index contexts.
 
 `timescale 1ns / 1ps
 
@@ -39,49 +39,49 @@ module argon2_block_fabric #(
     // Requester side: one outstanding block request per requester.
     output logic [REQUESTERS-1:0]                    rd_ready,
     input  logic [REQUESTERS-1:0]                    rd_valid,
-    input  logic [CONTEXT_W-1:0]                     rd_context [0:REQUESTERS-1],
-    input  logic [REQUEST_W-1:0]                     rd_request [0:REQUESTERS-1],
-    input  logic [ADDR_W-1:0]                        rd_block_addr [0:REQUESTERS-1],
+    input  logic [REQUESTERS-1:0][CONTEXT_W-1:0]     rd_context,
+    input  logic [REQUESTERS-1:0][REQUEST_W-1:0]     rd_request,
+    input  logic [REQUESTERS-1:0][ADDR_W-1:0]        rd_block_addr,
 
     output logic [REQUESTERS-1:0]                    rsp_valid,
     input  logic [REQUESTERS-1:0]                    rsp_ready,
-    output logic [CONTEXT_W-1:0]                     rsp_context [0:REQUESTERS-1],
-    output logic [REQUEST_W-1:0]                     rsp_request [0:REQUESTERS-1],
-    output logic [BEAT_W-1:0]                        rsp_beat [0:REQUESTERS-1],
+    output logic [REQUESTERS-1:0][CONTEXT_W-1:0]     rsp_context,
+    output logic [REQUESTERS-1:0][REQUEST_W-1:0]     rsp_request,
+    output logic [REQUESTERS-1:0][BEAT_W-1:0]        rsp_beat,
     output logic [REQUESTERS-1:0]                    rsp_last,
-    output logic [DATA_W-1:0]                        rsp_data [0:REQUESTERS-1],
+    output logic [REQUESTERS-1:0][DATA_W-1:0]        rsp_data,
     output logic [REQUESTERS-1:0]                    rsp_error,
 
     // Requester-side write stream. Beats of one block must be presented in
     // order; the fabric may arbitrate different requesters independently.
     output logic [REQUESTERS-1:0]                    wr_ready,
     input  logic [REQUESTERS-1:0]                    wr_valid,
-    input  logic [CONTEXT_W-1:0]                     wr_context [0:REQUESTERS-1],
-    input  logic [ADDR_W-1:0]                        wr_block_addr [0:REQUESTERS-1],
-    input  logic [BEAT_W-1:0]                        wr_beat [0:REQUESTERS-1],
+    input  logic [REQUESTERS-1:0][CONTEXT_W-1:0]     wr_context,
+    input  logic [REQUESTERS-1:0][ADDR_W-1:0]        wr_block_addr,
+    input  logic [REQUESTERS-1:0][BEAT_W-1:0]        wr_beat,
     input  logic [REQUESTERS-1:0]                    wr_last,
-    input  logic [DATA_W-1:0]                        wr_data [0:REQUESTERS-1],
+    input  logic [REQUESTERS-1:0][DATA_W-1:0]        wr_data,
 
     // Partition side.  A partition memory must return beats in order for
     // the accepted command, and assert data_last on beat 15.
     output logic [PARTITIONS-1:0]                    mem_rd_valid,
     input  logic [PARTITIONS-1:0]                    mem_rd_ready,
-    output logic [CONTEXT_W-1:0]                     mem_rd_context [0:PARTITIONS-1],
-    output logic [ADDR_W-1:0]                        mem_rd_block_addr [0:PARTITIONS-1],
+    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]     mem_rd_context,
+    output logic [PARTITIONS-1:0][ADDR_W-1:0]        mem_rd_block_addr,
     input  logic [PARTITIONS-1:0]                    mem_data_valid,
     output logic [PARTITIONS-1:0]                    mem_data_ready,
-    input  logic [BEAT_W-1:0]                        mem_data_beat [0:PARTITIONS-1],
+    input  logic [PARTITIONS-1:0][BEAT_W-1:0]        mem_data_beat,
     input  logic [PARTITIONS-1:0]                    mem_data_last,
-    input  logic [DATA_W-1:0]                        mem_data [0:PARTITIONS-1],
+    input  logic [PARTITIONS-1:0][DATA_W-1:0]        mem_data,
     input  logic [PARTITIONS-1:0]                    mem_data_error,
 
     output logic [PARTITIONS-1:0]                    mem_wr_valid,
     input  logic [PARTITIONS-1:0]                    mem_wr_ready,
-    output logic [CONTEXT_W-1:0]                     mem_wr_context [0:PARTITIONS-1],
-    output logic [ADDR_W-1:0]                        mem_wr_block_addr [0:PARTITIONS-1],
-    output logic [BEAT_W-1:0]                        mem_wr_beat [0:PARTITIONS-1],
+    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]     mem_wr_context,
+    output logic [PARTITIONS-1:0][ADDR_W-1:0]        mem_wr_block_addr,
+    output logic [PARTITIONS-1:0][BEAT_W-1:0]        mem_wr_beat,
     output logic [PARTITIONS-1:0]                    mem_wr_last,
-    output logic [DATA_W-1:0]                        mem_wr_data [0:PARTITIONS-1]
+    output logic [PARTITIONS-1:0][DATA_W-1:0]        mem_wr_data
 );
     localparam int PART_W = (PARTITIONS <= 1) ? 1 : $clog2(PARTITIONS);
     localparam int RW     = (REQUESTERS <= 1) ? 1 : $clog2(REQUESTERS);
@@ -112,6 +112,7 @@ module argon2_block_fabric #(
         end
     endfunction
 
+    // ---- unpacked internal state (indexed by loop variables) -------------
     logic [REQUESTERS-1:0] q_valid;
     logic [CONTEXT_W-1:0]  q_context [0:REQUESTERS-1];
     logic [REQUEST_W-1:0]  q_request [0:REQUESTERS-1];
@@ -128,6 +129,15 @@ module argon2_block_fabric #(
     logic [REQUESTERS-1:0] active_owner [0:PARTITIONS-1];
     logic [RW-1:0]         rr [0:PARTITIONS-1];   // round-robin start (reads)
     logic [RW-1:0]         wr_rr [0:PARTITIONS-1];
+
+    // Unpacked copies of the write-side request fields, because the write
+    // arbitration condition reads them by variable requester index.
+    logic [CONTEXT_W-1:0]  wr_ctx_q [0:REQUESTERS-1];
+    logic [ADDR_W-1:0]     wr_blk_q [0:REQUESTERS-1];
+    for (genvar g = 0; g < REQUESTERS; g++) begin : g_wrin
+        assign wr_ctx_q[g] = wr_context[g];
+        assign wr_blk_q[g] = wr_block_addr[g];
+    end
 
     logic [REQUESTERS-1:0] requester_busy;
 
@@ -189,7 +199,7 @@ module argon2_block_fabric #(
             for (int off = 0; off < REQUESTERS; off++) begin
                 r = (start + off) % REQUESTERS;
                 if (!found && wr_valid[r] &&
-                    (map_partition(wr_context[r], wr_block_addr[r]) == p)) begin
+                    (map_partition(wr_ctx_q[r], wr_blk_q[r]) == p)) begin
                     wr_grant[p][r] = 1'b1;
                     found = 1'b1;
                     mem_wr_valid[p] = 1'b1;

@@ -36,24 +36,32 @@ module tb_argon2_multi_ctx #(
     logic all_idle;
 
     logic [PARTITIONS-1:0] mem_rd_valid, mem_rd_ready;
-    logic [CW-1:0]         mem_rd_context [0:PARTITIONS-1];
-    logic [ADDR_W-1:0]     mem_rd_block_addr [0:PARTITIONS-1];
+    logic [PARTITIONS-1:0][CW-1:0]  mem_rd_context;
+    logic [PARTITIONS-1:0][ADDR_W-1:0] mem_rd_block_addr;
     logic [PARTITIONS-1:0] mem_data_valid, mem_data_ready, mem_data_last, mem_data_error;
-    logic [3:0]            mem_data_beat [0:PARTITIONS-1];
-    logic [511:0]          mem_data [0:PARTITIONS-1];
+    logic [PARTITIONS-1:0][3:0] mem_data_beat;
+    logic [PARTITIONS-1:0][511:0] mem_data;
     logic [PARTITIONS-1:0] mem_wr_valid, mem_wr_ready, mem_wr_last;
-    logic [CW-1:0]         mem_wr_context [0:PARTITIONS-1];
-    logic [ADDR_W-1:0]     mem_wr_block_addr [0:PARTITIONS-1];
-    logic [3:0]            mem_wr_beat [0:PARTITIONS-1];
-    logic [511:0]          mem_wr_data [0:PARTITIONS-1];
+    logic [PARTITIONS-1:0][CW-1:0]  mem_wr_context;
+    logic [PARTITIONS-1:0][ADDR_W-1:0] mem_wr_block_addr;
+    logic [PARTITIONS-1:0][3:0] mem_wr_beat;
+    logic [PARTITIONS-1:0][511:0] mem_wr_data;
 
     logic [511:0] mem [0:NUM_BLOCKS-1][0:NBEAT-1];
     logic [511:0] exp [0:NBLK*NBEAT-1];
 
     logic [PARTITIONS-1:0] rd_pending;
-    integer rd_lat [0:PARTITIONS-1];
-    logic [3:0] rd_beat [0:PARTITIONS-1];
-    integer rd_blk [0:PARTITIONS-1];
+    logic [7:0]   rd_lat [0:PARTITIONS-1];
+    logic [3:0]   rd_beat [0:PARTITIONS-1];
+    logic [ADDR_W-1:0] rd_blk [0:PARTITIONS-1];
+
+    // Unpacked copy of the fabric's write-beat bus, because it is used as an
+    // array index in the write path (a constant-required context Icarus
+    // cannot elaborate from a packed part-select).
+    logic [3:0] wr_beat_q [0:PARTITIONS-1];
+    for (genvar g = 0; g < PARTITIONS; g++) begin : g_wrb
+        assign wr_beat_q[g] = mem_wr_beat[g];
+    end
 
     always #5 clk = ~clk;
 
@@ -89,33 +97,34 @@ module tb_argon2_multi_ctx #(
         mem_data_last  = '0;
         mem_data_error = '0;
         for (int p = 0; p < PARTITIONS; p++) begin
-            mem_data_valid[p] = rd_pending[p] && (rd_lat[p] <= 0);
-            mem_data_last[p]  = rd_pending[p] && (rd_lat[p] <= 0) && (rd_beat[p] == 4'd15);
+            mem_data_valid[p] = rd_pending[p] && (rd_lat[p] == '0);
+            mem_data_last[p]  = rd_pending[p] && (rd_beat[p] == 4'd15);
             mem_data_beat[p]  = rd_beat[p];
             mem_data[p]       = mem[rd_blk[p]][rd_beat[p]];
         end
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
-        integer ctx_p, low;
+        logic [CW-1:0] ctx_p;
+        logic [PART_W-1:0] low;
         if (!rst_n) begin
             rd_pending <= '0;
             for (int p = 0; p < PARTITIONS; p++) begin
-                rd_lat[p] <= 0;
-                rd_beat[p] <= 4'd0;
-                rd_blk[p]  <= 0;
+                rd_lat[p]  <= '0;
+                rd_beat[p] <= '0;
+                rd_blk[p]  <= '0;
             end
         end else begin
             for (int p = 0; p < PARTITIONS; p++) begin
                 if (mem_rd_valid[p] && mem_rd_ready[p]) begin
                     ctx_p = mem_rd_context[p];
-                    low = (p - ctx_p) & (PARTITIONS - 1);
+                    low = (p[PART_W-1:0] - ctx_p[PART_W-1:0]) & (PARTITIONS - 1);
                     rd_pending[p] <= 1'b1;
-                    rd_lat[p]     <= RD_LAT;
+                    rd_lat[p]     <= RD_LAT[7:0];
                     rd_beat[p]    <= 4'd0;
-                    rd_blk[p]     <= (int'(mem_rd_block_addr[p]) << PART_W) | low;
-                end else if (rd_pending[p] && (rd_lat[p] > 0)) begin
-                    rd_lat[p] <= rd_lat[p] - 1;
+                    rd_blk[p]     <= (mem_rd_block_addr[p] << PART_W) | low;
+                end else if (rd_pending[p] && (rd_lat[p] != '0)) begin
+                    rd_lat[p] <= rd_lat[p] - 1'b1;
                 end else if (rd_pending[p] && mem_data_valid[p] &&
                              mem_data_ready[p] && mem_data_last[p]) begin
                     rd_pending[p] <= 1'b0;
@@ -129,14 +138,16 @@ module tb_argon2_multi_ctx #(
 
     // ---- write path ------------------------------------------------------
     always_ff @(posedge clk) begin
-        integer ctx_p, low, g;
+        logic [CW-1:0] ctx_p;
+        logic [PART_W-1:0] low;
+        logic [ADDR_W-1:0] g;
         if (rst_n) begin
             for (int p = 0; p < PARTITIONS; p++) begin
                 if (mem_wr_valid[p] && mem_wr_ready[p]) begin
                     ctx_p = mem_wr_context[p];
-                    low = (p - ctx_p) & (PARTITIONS - 1);
-                    g = (int'(mem_wr_block_addr[p]) << PART_W) | low;
-                    mem[g][mem_wr_beat[p]] <= mem_wr_data[p];
+                    low = (p[PART_W-1:0] - ctx_p[PART_W-1:0]) & (PARTITIONS - 1);
+                    g = (mem_wr_block_addr[p] << PART_W) | low;
+                    mem[g][wr_beat_q[p]] <= mem_wr_data[p];
                 end
             end
         end

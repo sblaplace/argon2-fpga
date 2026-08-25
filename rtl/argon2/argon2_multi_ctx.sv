@@ -47,21 +47,21 @@ module argon2_multi_ctx #(
     // ---- fabric partition side (attach the HBM memory model here) --------
     output logic [PARTITIONS-1:0]                    mem_rd_valid,
     input  logic [PARTITIONS-1:0]                    mem_rd_ready,
-    output logic [CONTEXT_W-1:0]                     mem_rd_context [0:PARTITIONS-1],
-    output logic [ADDR_W-1:0]                        mem_rd_block_addr [0:PARTITIONS-1],
+    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]     mem_rd_context,
+    output logic [PARTITIONS-1:0][ADDR_W-1:0]        mem_rd_block_addr,
     input  logic [PARTITIONS-1:0]                    mem_data_valid,
     output logic [PARTITIONS-1:0]                    mem_data_ready,
-    input  logic [3:0]                               mem_data_beat [0:PARTITIONS-1],
+    input  logic [PARTITIONS-1:0][3:0]               mem_data_beat,
     input  logic [PARTITIONS-1:0]                    mem_data_last,
-    input  logic [511:0]                             mem_data [0:PARTITIONS-1],
+    input  logic [PARTITIONS-1:0][511:0]             mem_data,
     input  logic [PARTITIONS-1:0]                    mem_data_error,
     output logic [PARTITIONS-1:0]                    mem_wr_valid,
     input  logic [PARTITIONS-1:0]                    mem_wr_ready,
-    output logic [CONTEXT_W-1:0]                     mem_wr_context [0:PARTITIONS-1],
-    output logic [ADDR_W-1:0]                        mem_wr_block_addr [0:PARTITIONS-1],
-    output logic [3:0]                               mem_wr_beat [0:PARTITIONS-1],
+    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]     mem_wr_context,
+    output logic [PARTITIONS-1:0][ADDR_W-1:0]        mem_wr_block_addr,
+    output logic [PARTITIONS-1:0][3:0]               mem_wr_beat,
     output logic [PARTITIONS-1:0]                    mem_wr_last,
-    output logic [511:0]                             mem_wr_data [0:PARTITIONS-1]
+    output logic [PARTITIONS-1:0][511:0]             mem_wr_data
 );
     // ---- context descriptor table ----------------------------------------
     logic [CONTEXTS-1:0] d_pending, d_running;
@@ -72,12 +72,14 @@ module argon2_multi_ctx #(
     logic [ADDR_W-1:0] d_base [0:CONTEXTS-1];
 
     // ---- lane state ------------------------------------------------------
-    integer            lane_ctx [0:LANES-1];   // context on lane i; -1 = idle
+    logic [LANES-1:0]  lane_busy;              // lane i is running a context
+    logic [CONTEXT_W-1:0] lane_ctx [0:LANES-1];// context on lane i (valid if busy)
     logic [LANES-1:0]  lane_start;             // dispatch pulse to the lane
     logic [LANES-1:0]  lane_done;              // completion pulse from the lane
-    integer            rr_ctx;                 // round-robin dispatch pointer
+    logic [CONTEXT_W-1:0] rr_ctx;              // round-robin dispatch pointer
 
-    // Lane parameter mux (combinational from the assigned descriptor).
+    // Lane parameters, latched from the descriptor at dispatch (so the lane
+    // sees a stable context for its whole run).
     logic [31:0]       lane_pass [0:LANES-1];
     logic [31:0]       lane_len  [0:LANES-1];
     logic [31:0]       lane_mem  [0:LANES-1];
@@ -87,43 +89,22 @@ module argon2_multi_ctx #(
 
     // Fabric requester-side wiring (LANES requesters).
     logic [LANES-1:0] rd_valid, rd_ready;
-    logic [CONTEXT_W-1:0] rd_context [0:LANES-1];
-    logic [15:0] rd_request [0:LANES-1];
-    logic [ADDR_W-1:0] rd_block_addr [0:LANES-1];
+    logic [LANES-1:0][CONTEXT_W-1:0] rd_context;
+    logic [LANES-1:0][15:0] rd_request;
+    logic [LANES-1:0][ADDR_W-1:0] rd_block_addr;
     logic [LANES-1:0] rsp_valid, rsp_ready;
-    logic [15:0] rsp_request [0:LANES-1];
-    logic [3:0] rsp_beat [0:LANES-1];
+    logic [LANES-1:0][15:0] rsp_request;
+    logic [LANES-1:0][3:0] rsp_beat;
     logic [LANES-1:0] rsp_last, rsp_error;
-    logic [511:0] rsp_data [0:LANES-1];
+    logic [LANES-1:0][511:0] rsp_data;
     logic [LANES-1:0] wr_valid, wr_ready, wr_last;
-    logic [CONTEXT_W-1:0] wr_context [0:LANES-1];
-    logic [ADDR_W-1:0] wr_block_addr [0:LANES-1];
-    logic [3:0] wr_beat [0:LANES-1];
-    logic [511:0] wr_data [0:LANES-1];
+    logic [LANES-1:0][CONTEXT_W-1:0] wr_context;
+    logic [LANES-1:0][ADDR_W-1:0] wr_block_addr;
+    logic [LANES-1:0][3:0] wr_beat;
+    logic [LANES-1:0][511:0] wr_data;
 
     assign ctx_busy = d_pending | d_running;
     assign all_idle = !(|ctx_busy);
-
-    // ---- parameter mux ---------------------------------------------------
-    always_comb begin
-        for (int i = 0; i < LANES; i++) begin
-            if (lane_ctx[i] >= 0) begin
-                lane_pass[i] = d_pass[lane_ctx[i]];
-                lane_len[i]  = d_len[lane_ctx[i]];
-                lane_mem[i]  = d_mem[lane_ctx[i]];
-                lane_type[i] = d_type[lane_ctx[i]];
-                lane_base[i] = d_base[lane_ctx[i]];
-                lane_cid[i]  = CONTEXT_W'(lane_ctx[i]);
-            end else begin
-                lane_pass[i] = 32'd0;
-                lane_len[i]  = 32'd0;
-                lane_mem[i]  = 32'd0;
-                lane_type[i] = 2'd0;
-                lane_base[i] = '0;
-                lane_cid[i]  = '0;
-            end
-        end
-    end
 
     // ---- scheduler -------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
@@ -131,8 +112,9 @@ module argon2_multi_ctx #(
             d_pending  <= '0;
             d_running  <= '0;
             ctx_done   <= '0;
-            rr_ctx     <= 0;
+            rr_ctx     <= '0;
             lane_start <= '0;
+            lane_busy  <= '0;
             for (int c = 0; c < CONTEXTS; c++) begin
                 d_pass[c] <= 32'd0;
                 d_len[c]  <= 32'd0;
@@ -140,10 +122,18 @@ module argon2_multi_ctx #(
                 d_type[c] <= 2'd0;
                 d_base[c] <= '0;
             end
-            for (int i = 0; i < LANES; i++)
-                lane_ctx[i] <= -1;
+            for (int i = 0; i < LANES; i++) begin
+                lane_ctx[i]  <= '0;
+                lane_pass[i] <= 32'd0;
+                lane_len[i]  <= 32'd0;
+                lane_mem[i]  <= 32'd0;
+                lane_type[i] <= 2'd0;
+                lane_base[i] <= '0;
+                lane_cid[i]  <= '0;
+            end
         end else begin
-            integer nxt, lid, k, c;
+            logic found_nxt, found_lid;
+            logic [CONTEXT_W-1:0] nxt, lid, k, c;
             ctx_done   <= '0;
             lane_start <= '0;
 
@@ -162,30 +152,42 @@ module argon2_multi_ctx #(
 
             // Retire completed lanes.
             for (int i = 0; i < LANES; i++) begin
-                if (lane_done[i] && lane_ctx[i] >= 0) begin
+                if (lane_done[i] && lane_busy[i]) begin
                     ctx_done[lane_ctx[i]] <= 1'b1;
                     d_running[lane_ctx[i]]  <= 1'b0;
-                    lane_ctx[i]             <= -1;
+                    lane_busy[i]            <= 1'b0;
                 end
             end
 
             // Dispatch one pending context into one idle lane per cycle.
-            nxt = -1;
+            found_nxt = 1'b0;
             for (k = 0; k < CONTEXTS; k++) begin
                 c = (rr_ctx + k) % CONTEXTS;
-                if (d_pending[c] && nxt == -1)
+                if (!found_nxt && d_pending[c]) begin
                     nxt = c;
+                    found_nxt = 1'b1;
+                end
             end
-            lid = -1;
-            for (int i = 0; i < LANES; i++)
-                if (lane_ctx[i] == -1 && lid == -1)
-                    lid = i;
-            if (nxt != -1 && lid != -1) begin
+            found_lid = 1'b0;
+            for (int i = 0; i < LANES; i++) begin
+                if (!found_lid && !lane_busy[i]) begin
+                    lid = CONTEXT_W'(i);
+                    found_lid = 1'b1;
+                end
+            end
+            if (found_nxt && found_lid) begin
                 lane_ctx[lid]    <= nxt;
+                lane_busy[lid]   <= 1'b1;
+                lane_pass[lid]   <= d_pass[nxt];
+                lane_len[lid]    <= d_len[nxt];
+                lane_mem[lid]    <= d_mem[nxt];
+                lane_type[lid]   <= d_type[nxt];
+                lane_base[lid]   <= d_base[nxt];
+                lane_cid[lid]    <= nxt;
                 d_pending[nxt]   <= 1'b0;
                 d_running[nxt]   <= 1'b1;
                 lane_start[lid]  <= 1'b1;
-                rr_ctx <= (nxt == CONTEXTS - 1) ? 0 : nxt + 1;
+                rr_ctx <= (nxt == CONTEXT_W'(CONTEXTS - 1)) ? '0 : nxt + 1'b1;
             end
         end
     end
