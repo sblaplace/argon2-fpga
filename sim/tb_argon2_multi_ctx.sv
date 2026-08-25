@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Many-context KAT: CONTEXTS independent p=1 contexts through one logical HBM
 // stack (argon2_multi_ctx + argon2_block_fabric) against a data-storing,
-// per-partition-latency memory model.  Each context gets its own init/exp hex
-// pair (distinct password, so cross-context contamination is detectable), and
-// the whole per-context working set is compared after the run.
+// per-partition-latency memory model.  Each context gets a distinct
+// password/salt (concatenated in context order in the vector files), so a
+// block misrouted by the shared fabric (cross-context contamination) lands on
+// the wrong block and fails the compare.
 //
 // The memory model reconstructs the fabric's reversible block mapping
 //   global = (local << PART_W) | ((partition - context) & (PARTITIONS-1))
-// and stores each 512-bit beat by (global block, beat), so a read or write
-// that the fabric misroutes lands on the wrong block and fails the compare.
+// and stores each 512-bit beat at (global block * NBEAT + beat), so a read
+// or write that the fabric misroutes fails the compare.
 
 `timescale 1ns / 1ps
 
@@ -23,6 +24,7 @@ module tb_argon2_multi_ctx #(
     localparam int NBLK    = 8;     // memory blocks per context (m'=8 KiB)
     localparam int NBEAT   = 16;
     localparam int NUM_BLOCKS = CONTEXTS * NBLK;
+    localparam int NUM_BEATS  = NUM_BLOCKS * NBEAT;
     localparam int PART_W  = (PARTITIONS <= 1) ? 1 : $clog2(PARTITIONS);
     localparam int RD_LAT  = 8;
 
@@ -47,8 +49,8 @@ module tb_argon2_multi_ctx #(
     logic [PARTITIONS-1:0][3:0] mem_wr_beat;
     logic [PARTITIONS-1:0][511:0] mem_wr_data;
 
-    logic [511:0] mem [0:NUM_BLOCKS-1][0:NBEAT-1];
-    logic [511:0] exp [0:NBLK*NBEAT-1];
+    logic [511:0] mem [0:NUM_BEATS-1];
+    logic [511:0] exp [0:NUM_BEATS-1];
 
     logic [PARTITIONS-1:0] rd_pending;
     logic [7:0]   rd_lat [0:PARTITIONS-1];
@@ -100,7 +102,7 @@ module tb_argon2_multi_ctx #(
             mem_data_valid[p] = rd_pending[p] && (rd_lat[p] == '0);
             mem_data_last[p]  = rd_pending[p] && (rd_beat[p] == 4'd15);
             mem_data_beat[p]  = rd_beat[p];
-            mem_data[p]       = mem[rd_blk[p]][rd_beat[p]];
+            mem_data[p]       = mem[rd_blk[p] * NBEAT + rd_beat[p]];
         end
     end
 
@@ -147,7 +149,7 @@ module tb_argon2_multi_ctx #(
                     ctx_p = mem_wr_context[p];
                     low = (p[PART_W-1:0] - ctx_p[PART_W-1:0]) & (PARTITIONS - 1);
                     g = (mem_wr_block_addr[p] << PART_W) | low;
-                    mem[g][wr_beat_q[p]] <= mem_wr_data[p];
+                    mem[g * NBEAT + wr_beat_q[p]] <= mem_wr_data[p];
                 end
             end
         end
@@ -157,9 +159,8 @@ module tb_argon2_multi_ctx #(
     integer errors, cycles;
 
     task automatic run_type(
-        input [1:0] typ, input string stem, input string name
+        input [1:0] typ, input string init_f, input string exp_f, input string name
     );
-        string f;
         integer c, i, b, mismatches;
         $display("multi %s ...", name);
         // Reset the DUT and clear the fabric/memory state.
@@ -168,14 +169,8 @@ module tb_argon2_multi_ctx #(
         rst_n = 1'b1;
         @(posedge clk);
 
-        // Seed every context region with its own init image.
-        for (c = 0; c < CONTEXTS; c++) begin
-            f = $sformatf("%s_c%0d_init.hex", stem, c);
-            $readmemh(f, exp);
-            for (i = 0; i < NBLK; i++)
-                for (b = 0; b < NBEAT; b++)
-                    mem[c*NBLK + i][b] = exp[i*NBEAT + b];
-        end
+        // Seed the whole stack from the concatenated init image.
+        $readmemh(init_f, mem);
 
         // Program descriptors and launch every context.
         for (c = 0; c < CONTEXTS; c++) begin
@@ -210,20 +205,15 @@ module tb_argon2_multi_ctx #(
         // A couple of settle cycles for the last write beats.
         repeat (2) @(posedge clk);
 
-        // Compare every context's working set against its reference.
+        // Compare the whole working set against the reference.
+        $readmemh(exp_f, exp);
         mismatches = 0;
-        for (c = 0; c < CONTEXTS; c++) begin
-            f = $sformatf("%s_c%0d_exp.hex", stem, c);
-            $readmemh(f, exp);
-            for (i = 0; i < NBLK; i++) begin
-                for (b = 0; b < NBEAT; b++) begin
-                    if (mem[c*NBLK + i][b] !== exp[i*NBEAT + b]) begin
-                        if (mismatches < 4)
-                            $display("FAIL %s ctx %0d blk %0d beat %0d got %0128h exp %0128h",
-                                     name, c, i, b, mem[c*NBLK+i][b], exp[i*NBEAT+b]);
-                        mismatches = mismatches + 1;
-                    end
-                end
+        for (i = 0; i < NUM_BEATS; i++) begin
+            if (mem[i] !== exp[i]) begin
+                if (mismatches < 4)
+                    $display("FAIL %s beat %0d got %0128h exp %0128h",
+                             name, i, mem[i], exp[i]);
+                mismatches = mismatches + 1;
             end
         end
 
@@ -246,9 +236,9 @@ module tb_argon2_multi_ctx #(
         rst_n = 1'b1;
         @(posedge clk);
 
-        run_type(2'd1, "gen/multi_i",  "argon2i");
-        run_type(2'd0, "gen/multi_d",  "argon2d");
-        run_type(2'd2, "gen/multi_id", "argon2id");
+        run_type(2'd1, "gen/multi_i_init.hex",  "gen/multi_i_exp.hex",  "argon2i");
+        run_type(2'd0, "gen/multi_d_init.hex",  "gen/multi_d_exp.hex",  "argon2d");
+        run_type(2'd2, "gen/multi_id_init.hex", "gen/multi_id_exp.hex", "argon2id");
 
         if (errors == 0) begin
             $display("tb_argon2_multi_ctx PASS");

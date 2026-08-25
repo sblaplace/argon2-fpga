@@ -92,10 +92,13 @@ def dump_sweep(m: int, t: int, type_: Type, stem: str) -> None:
 
 
 def dump_multi(type_: Type, nctx: int, stem: str) -> None:
-    """One init/exp pair per independent p=1 context for tb_argon2_multi_ctx.
-    Each context uses a distinct password/salt so that a block misrouted by
-    the shared fabric (cross-context contamination) shows up as a mismatch
-    rather than passing because all contexts hold identical data."""
+    """Concatenated init/exp for tb_argon2_multi_ctx: nctx independent p=1
+    contexts, each with a distinct password/salt, appended in context order
+    (block-major within each context). A block misrouted by the shared fabric
+    (cross-context contamination) therefore shows up as a mismatch rather
+    than passing because all contexts hold identical data."""
+    inits: list[list[int]] = []
+    finals: list[list[int]] = []
     for c in range(nctx):
         kw = dict(
             time_cost=2,
@@ -108,8 +111,10 @@ def dump_multi(type_: Type, nctx: int, stem: str) -> None:
         salt = f"somesalt-{c}".encode()
         init = argon2_init_memory(pwd, salt, **kw)
         tag, final = argon2_fill(pwd, salt, **kw)
-        write_mem_hex(GEN / f"{stem}_c{c}_init.hex", init)
-        write_mem_hex(GEN / f"{stem}_c{c}_exp.hex", final)
+        inits.extend(init)
+        finals.extend(final)
+    write_mem_hex(GEN / f"{stem}_init.hex", inits)
+    write_mem_hex(GEN / f"{stem}_exp.hex", finals)
 
 
 def dump_p4(m: int, t: int, type_: Type, stem: str) -> None:

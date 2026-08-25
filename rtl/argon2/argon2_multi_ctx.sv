@@ -76,7 +76,7 @@ module argon2_multi_ctx #(
     logic [CONTEXT_W-1:0] lane_ctx [0:LANES-1];// context on lane i (valid if busy)
     logic [LANES-1:0]  lane_start;             // dispatch pulse to the lane
     logic [LANES-1:0]  lane_done;              // completion pulse from the lane
-    logic [CONTEXT_W-1:0] rr_ctx;              // round-robin dispatch pointer
+    integer            rr_ctx;                 // round-robin dispatch pointer
 
     // Lane parameters, latched from the descriptor at dispatch (so the lane
     // sees a stable context for its whole run).
@@ -112,7 +112,7 @@ module argon2_multi_ctx #(
             d_pending  <= '0;
             d_running  <= '0;
             ctx_done   <= '0;
-            rr_ctx     <= '0;
+            rr_ctx     <= 0;
             lane_start <= '0;
             lane_busy  <= '0;
             for (int c = 0; c < CONTEXTS; c++) begin
@@ -132,8 +132,7 @@ module argon2_multi_ctx #(
                 lane_cid[i]  <= '0;
             end
         end else begin
-            logic found_nxt, found_lid;
-            logic [CONTEXT_W-1:0] nxt, lid, k, c;
+            integer k, c, nxt, lid;
             ctx_done   <= '0;
             lane_start <= '0;
 
@@ -160,34 +159,30 @@ module argon2_multi_ctx #(
             end
 
             // Dispatch one pending context into one idle lane per cycle.
-            found_nxt = 1'b0;
-            for (k = 0; k < CONTEXTS; k++) begin
+            nxt = -1;
+            for (k = 0; k < CONTEXTS; k = k + 1) begin
                 c = (rr_ctx + k) % CONTEXTS;
-                if (!found_nxt && d_pending[c]) begin
+                if (d_pending[c] && (nxt == -1))
                     nxt = c;
-                    found_nxt = 1'b1;
-                end
             end
-            found_lid = 1'b0;
+            lid = -1;
             for (int i = 0; i < LANES; i++) begin
-                if (!found_lid && !lane_busy[i]) begin
-                    lid = CONTEXT_W'(i);
-                    found_lid = 1'b1;
-                end
+                if ((lid == -1) && !lane_busy[i])
+                    lid = i;
             end
-            if (found_nxt && found_lid) begin
-                lane_ctx[lid]    <= nxt;
+            if ((nxt != -1) && (lid != -1)) begin
+                lane_ctx[lid]    <= CONTEXT_W'(nxt);
                 lane_busy[lid]   <= 1'b1;
                 lane_pass[lid]   <= d_pass[nxt];
                 lane_len[lid]    <= d_len[nxt];
                 lane_mem[lid]    <= d_mem[nxt];
                 lane_type[lid]   <= d_type[nxt];
                 lane_base[lid]   <= d_base[nxt];
-                lane_cid[lid]    <= nxt;
+                lane_cid[lid]    <= CONTEXT_W'(nxt);
                 d_pending[nxt]   <= 1'b0;
                 d_running[nxt]   <= 1'b1;
                 lane_start[lid]  <= 1'b1;
-                rr_ctx <= (nxt == CONTEXT_W'(CONTEXTS - 1)) ? '0 : nxt + 1'b1;
+                rr_ctx <= (nxt == CONTEXTS - 1) ? 0 : nxt + 1;
             end
         end
     end

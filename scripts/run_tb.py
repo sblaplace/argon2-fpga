@@ -103,7 +103,7 @@ def run_streaming(cmd, cwd, timeout, label, require_pass):
     if rc != 0:
         print(f"\n[FAIL] {label}: exit code {rc}\n")
         gh_annotation("error", f"EXIT {rc}: {label}",
-                      out[-800:])
+                      out[-16000:])
         return False
     if require_pass and PASS_MARKER not in out:
         print(f"\n[FAIL] {label}: output did not contain '{PASS_MARKER}'\n")
