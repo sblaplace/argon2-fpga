@@ -199,30 +199,29 @@ module tb_argon2_multi_ctx #(
         if (!all_idle) begin
             $display("FAIL %s timeout (%0d cycles)", name, cycles);
             errors = errors + 1;
-            return;
-        end
-
-        // A couple of settle cycles for the last write beats.
-        repeat (2) @(posedge clk);
-
-        // Compare the whole working set against the reference.
-        $readmemh(exp_f, exp);
-        mismatches = 0;
-        for (i = 0; i < NUM_BEATS; i++) begin
-            if (mem[i] !== exp[i]) begin
-                if (mismatches < 4)
-                    $display("FAIL %s beat %0d got %0128h exp %0128h",
-                             name, i, mem[i], exp[i]);
-                mismatches = mismatches + 1;
-            end
-        end
-
-        if (mismatches != 0) begin
-            $display("FAIL %s %0d beat(s) differ (%0d cycles)", name, mismatches, cycles);
-            errors = errors + 1;
         end else begin
-            $display("  %s PASS (%0d cycles, %0d contexts x %0d blocks)",
-                     name, cycles, CONTEXTS, NBLK);
+            // A couple of settle cycles for the last write beats.
+            repeat (2) @(posedge clk);
+
+            // Compare the whole working set against the reference.
+            $readmemh(exp_f, exp);
+            mismatches = 0;
+            for (i = 0; i < NUM_BEATS; i++) begin
+                if (mem[i] !== exp[i]) begin
+                    if (mismatches < 4)
+                        $display("FAIL %s beat %0d got %0128h exp %0128h",
+                                 name, i, mem[i], exp[i]);
+                    mismatches = mismatches + 1;
+                end
+            end
+
+            if (mismatches != 0) begin
+                $display("FAIL %s %0d beat(s) differ (%0d cycles)", name, mismatches, cycles);
+                errors = errors + 1;
+            end else begin
+                $display("  %s PASS (%0d cycles, %0d contexts x %0d blocks)",
+                         name, cycles, CONTEXTS, NBLK);
+            end
         end
     endtask
 
