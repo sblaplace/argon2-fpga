@@ -16,35 +16,37 @@ module tb_argon2_block_fabric #(
 
     logic clk, rst_n;
     logic [RQ-1:0] rd_ready, rd_valid;
-    logic [RQ-1:0][15:0] rd_context, rd_request;
-    logic [RQ-1:0][31:0] rd_block_addr;
+    logic [15:0]  rd_context [0:RQ-1];
+    logic [15:0]  rd_request [0:RQ-1];
+    logic [31:0]  rd_block_addr [0:RQ-1];
     logic [RQ-1:0] rsp_valid, rsp_ready, rsp_last, rsp_error;
-    logic [RQ-1:0][15:0] rsp_context, rsp_request;
-    logic [RQ-1:0][3:0] rsp_beat;
-    logic [RQ-1:0][DW-1:0] rsp_data;
+    logic [15:0]  rsp_context [0:RQ-1];
+    logic [15:0]  rsp_request [0:RQ-1];
+    logic [3:0]   rsp_beat [0:RQ-1];
+    logic [DW-1:0] rsp_data [0:RQ-1];
     logic [RQ-1:0] wr_ready, wr_valid, wr_last;
-    logic [RQ-1:0][15:0] wr_context;
-    logic [RQ-1:0][31:0] wr_block_addr;
-    logic [RQ-1:0][3:0] wr_beat;
-    logic [RQ-1:0][DW-1:0] wr_data;
+    logic [15:0]  wr_context [0:RQ-1];
+    logic [31:0]  wr_block_addr [0:RQ-1];
+    logic [3:0]   wr_beat [0:RQ-1];
+    logic [DW-1:0] wr_data [0:RQ-1];
 
     logic [PP-1:0] mem_rd_valid, mem_rd_ready;
-    logic [PP-1:0][15:0] mem_rd_context;
-    logic [PP-1:0][31:0] mem_rd_block_addr;
+    logic [15:0]  mem_rd_context [0:PP-1];
+    logic [31:0]  mem_rd_block_addr [0:PP-1];
     logic [PP-1:0] mem_data_valid, mem_data_ready, mem_data_last, mem_data_error;
-    logic [PP-1:0][3:0] mem_data_beat;
-    logic [PP-1:0][DW-1:0] mem_data;
+    logic [3:0]   mem_data_beat [0:PP-1];
+    logic [DW-1:0] mem_data [0:PP-1];
     logic [PP-1:0] mem_wr_valid, mem_wr_ready, mem_wr_last;
-    logic [PP-1:0][15:0] mem_wr_context;
-    logic [PP-1:0][31:0] mem_wr_block_addr;
-    logic [PP-1:0][3:0] mem_wr_beat;
-    logic [PP-1:0][DW-1:0] mem_wr_data;
+    logic [15:0]  mem_wr_context [0:PP-1];
+    logic [31:0]  mem_wr_block_addr [0:PP-1];
+    logic [3:0]   mem_wr_beat [0:PP-1];
+    logic [DW-1:0] mem_wr_data [0:PP-1];
 
     logic [PP-1:0] pending;
-    logic [PP-1:0][2:0] delay;
-    logic [PP-1:0][3:0] beat;
-    logic [PP-1:0][15:0] saved_context;
-    logic [PP-1:0][31:0] saved_addr;
+    logic [2:0]   delay [0:PP-1];
+    logic [3:0]   beat [0:PP-1];
+    logic [15:0]  saved_context [0:PP-1];
+    logic [31:0]  saved_addr [0:PP-1];
     integer got;
     integer rsp_cnt;
 
@@ -93,13 +95,12 @@ module tb_argon2_block_fabric #(
     always_comb begin
         mem_rd_ready = '1;
         mem_data_valid = '0;
-        mem_data_beat = beat;
         mem_data_last = '0;
         mem_data_error = '0;
-        mem_data = '0;
         for (int p = 0; p < PP; p++) begin
             mem_data_valid[p] = pending[p] && (delay[p] == '0);
             mem_data_last[p]  = pending[p] && (beat[p] == 4'd15);
+            mem_data_beat[p]  = beat[p];
             mem_data[p] = expected_data(saved_context[p], saved_addr[p], p, beat[p]);
         end
     end
@@ -107,10 +108,12 @@ module tb_argon2_block_fabric #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             pending <= '0;
-            delay <= '0;
-            beat <= '0;
-            saved_context <= '0;
-            saved_addr <= '0;
+            for (int p = 0; p < PP; p++) begin
+                delay[p]         <= '0;
+                beat[p]          <= '0;
+                saved_context[p] <= '0;
+                saved_addr[p]    <= '0;
+            end
         end else begin
             for (int p = 0; p < PP; p++) begin
                 if (mem_rd_valid[p] && mem_rd_ready[p]) begin
@@ -191,15 +194,19 @@ module tb_argon2_block_fabric #(
         clk = 1'b0;
         rst_n = 1'b0;
         rd_valid = '0;
-        rd_context = '0;
-        rd_request = '0;
-        rd_block_addr = '0;
+        for (int r = 0; r < RQ; r++) begin
+            rd_context[r] = '0;
+            rd_request[r] = '0;
+            rd_block_addr[r] = '0;
+        end
         wr_valid = '0;
-        wr_context = '0;
-        wr_block_addr = '0;
-        wr_beat = '0;
+        for (int r = 0; r < RQ; r++) begin
+            wr_context[r] = '0;
+            wr_block_addr[r] = '0;
+            wr_beat[r] = '0;
+            wr_data[r] = '0;
+        end
         wr_last = '0;
-        wr_data = '0;
         mem_wr_ready = '1;
         got = 0;
         repeat (4) @(posedge clk);

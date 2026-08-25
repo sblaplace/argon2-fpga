@@ -47,21 +47,21 @@ module argon2_multi_ctx #(
     // ---- fabric partition side (attach the HBM memory model here) --------
     output logic [PARTITIONS-1:0]                    mem_rd_valid,
     input  logic [PARTITIONS-1:0]                    mem_rd_ready,
-    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]     mem_rd_context,
-    output logic [PARTITIONS-1:0][ADDR_W-1:0]        mem_rd_block_addr,
+    output logic [CONTEXT_W-1:0]                     mem_rd_context [0:PARTITIONS-1],
+    output logic [ADDR_W-1:0]                        mem_rd_block_addr [0:PARTITIONS-1],
     input  logic [PARTITIONS-1:0]                    mem_data_valid,
     output logic [PARTITIONS-1:0]                    mem_data_ready,
-    input  logic [PARTITIONS-1:0][3:0]               mem_data_beat,
+    input  logic [3:0]                               mem_data_beat [0:PARTITIONS-1],
     input  logic [PARTITIONS-1:0]                    mem_data_last,
-    input  logic [PARTITIONS-1:0][511:0]             mem_data,
+    input  logic [511:0]                             mem_data [0:PARTITIONS-1],
     input  logic [PARTITIONS-1:0]                    mem_data_error,
     output logic [PARTITIONS-1:0]                    mem_wr_valid,
     input  logic [PARTITIONS-1:0]                    mem_wr_ready,
-    output logic [PARTITIONS-1:0][CONTEXT_W-1:0]     mem_wr_context,
-    output logic [PARTITIONS-1:0][ADDR_W-1:0]        mem_wr_block_addr,
-    output logic [PARTITIONS-1:0][3:0]               mem_wr_beat,
+    output logic [CONTEXT_W-1:0]                     mem_wr_context [0:PARTITIONS-1],
+    output logic [ADDR_W-1:0]                        mem_wr_block_addr [0:PARTITIONS-1],
+    output logic [3:0]                               mem_wr_beat [0:PARTITIONS-1],
     output logic [PARTITIONS-1:0]                    mem_wr_last,
-    output logic [PARTITIONS-1:0][511:0]             mem_wr_data
+    output logic [511:0]                             mem_wr_data [0:PARTITIONS-1]
 );
     // ---- context descriptor table ----------------------------------------
     logic [CONTEXTS-1:0] d_pending, d_running;
@@ -87,19 +87,19 @@ module argon2_multi_ctx #(
 
     // Fabric requester-side wiring (LANES requesters).
     logic [LANES-1:0] rd_valid, rd_ready;
-    logic [LANES-1:0][CONTEXT_W-1:0] rd_context;
-    logic [LANES-1:0][15:0] rd_request;
-    logic [LANES-1:0][ADDR_W-1:0] rd_block_addr;
+    logic [CONTEXT_W-1:0] rd_context [0:LANES-1];
+    logic [15:0] rd_request [0:LANES-1];
+    logic [ADDR_W-1:0] rd_block_addr [0:LANES-1];
     logic [LANES-1:0] rsp_valid, rsp_ready;
-    logic [LANES-1:0][15:0] rsp_request;
-    logic [LANES-1:0][3:0] rsp_beat;
+    logic [15:0] rsp_request [0:LANES-1];
+    logic [3:0] rsp_beat [0:LANES-1];
     logic [LANES-1:0] rsp_last, rsp_error;
-    logic [LANES-1:0][511:0] rsp_data;
+    logic [511:0] rsp_data [0:LANES-1];
     logic [LANES-1:0] wr_valid, wr_ready, wr_last;
-    logic [LANES-1:0][CONTEXT_W-1:0] wr_context;
-    logic [LANES-1:0][ADDR_W-1:0] wr_block_addr;
-    logic [LANES-1:0][3:0] wr_beat;
-    logic [LANES-1:0][511:0] wr_data;
+    logic [CONTEXT_W-1:0] wr_context [0:LANES-1];
+    logic [ADDR_W-1:0] wr_block_addr [0:LANES-1];
+    logic [3:0] wr_beat [0:LANES-1];
+    logic [511:0] wr_data [0:LANES-1];
 
     assign ctx_busy = d_pending | d_running;
     assign all_idle = !(|ctx_busy);
@@ -143,7 +143,7 @@ module argon2_multi_ctx #(
             for (int i = 0; i < LANES; i++)
                 lane_ctx[i] <= -1;
         end else begin
-            integer nxt, lid, k;
+            integer nxt, lid, k, c;
             ctx_done   <= '0;
             lane_start <= '0;
 
@@ -172,7 +172,6 @@ module argon2_multi_ctx #(
             // Dispatch one pending context into one idle lane per cycle.
             nxt = -1;
             for (k = 0; k < CONTEXTS; k++) begin
-                int c;
                 c = (rr_ctx + k) % CONTEXTS;
                 if (d_pending[c] && nxt == -1)
                     nxt = c;

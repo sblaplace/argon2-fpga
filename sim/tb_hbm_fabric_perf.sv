@@ -25,36 +25,38 @@ module tb_hbm_fabric_perf #(
 
     logic clk, rst_n;
     logic [REQUESTERS-1:0] rd_ready, rd_valid;
-    logic [REQUESTERS-1:0][15:0] rd_context, rd_request;
-    logic [REQUESTERS-1:0][31:0] rd_block_addr;
+    logic [15:0]  rd_context [0:REQUESTERS-1];
+    logic [15:0]  rd_request [0:REQUESTERS-1];
+    logic [31:0]  rd_block_addr [0:REQUESTERS-1];
     logic [REQUESTERS-1:0] rsp_valid, rsp_ready, rsp_last, rsp_error;
-    logic [REQUESTERS-1:0][15:0] rsp_context, rsp_request;
-    logic [REQUESTERS-1:0][3:0] rsp_beat;
-    logic [REQUESTERS-1:0][DW-1:0] rsp_data;
+    logic [15:0]  rsp_context [0:REQUESTERS-1];
+    logic [15:0]  rsp_request [0:REQUESTERS-1];
+    logic [3:0]   rsp_beat [0:REQUESTERS-1];
+    logic [DW-1:0] rsp_data [0:REQUESTERS-1];
     logic [REQUESTERS-1:0] wr_ready, wr_valid, wr_last;
-    logic [REQUESTERS-1:0][15:0] wr_context;
-    logic [REQUESTERS-1:0][31:0] wr_block_addr;
-    logic [REQUESTERS-1:0][3:0] wr_beat;
-    logic [REQUESTERS-1:0][DW-1:0] wr_data;
+    logic [15:0]  wr_context [0:REQUESTERS-1];
+    logic [31:0]  wr_block_addr [0:REQUESTERS-1];
+    logic [3:0]   wr_beat [0:REQUESTERS-1];
+    logic [DW-1:0] wr_data [0:REQUESTERS-1];
 
     logic [PARTITIONS-1:0] mem_rd_valid, mem_rd_ready;
-    logic [PARTITIONS-1:0][15:0] mem_rd_context;
-    logic [PARTITIONS-1:0][31:0] mem_rd_block_addr;
+    logic [15:0]  mem_rd_context [0:PARTITIONS-1];
+    logic [31:0]  mem_rd_block_addr [0:PARTITIONS-1];
     logic [PARTITIONS-1:0] mem_data_valid, mem_data_ready, mem_data_last, mem_data_error;
-    logic [PARTITIONS-1:0][3:0] mem_data_beat;
-    logic [PARTITIONS-1:0][DW-1:0] mem_data;
+    logic [3:0]   mem_data_beat [0:PARTITIONS-1];
+    logic [DW-1:0] mem_data [0:PARTITIONS-1];
     logic [PARTITIONS-1:0] mem_wr_valid, mem_wr_ready, mem_wr_last;
-    logic [PARTITIONS-1:0][15:0] mem_wr_context;
-    logic [PARTITIONS-1:0][31:0] mem_wr_block_addr;
-    logic [PARTITIONS-1:0][3:0] mem_wr_beat;
-    logic [PARTITIONS-1:0][DW-1:0] mem_wr_data;
+    logic [15:0]  mem_wr_context [0:PARTITIONS-1];
+    logic [31:0]  mem_wr_block_addr [0:PARTITIONS-1];
+    logic [3:0]   mem_wr_beat [0:PARTITIONS-1];
+    logic [DW-1:0] mem_wr_data [0:PARTITIONS-1];
 
     logic [REQUESTERS-1:0] rd_inflight;
-    logic [REQUESTERS-1:0][31:0] next_block;
-    logic [REQUESTERS-1:0][3:0] next_wr_beat;
+    logic [31:0]  next_block [0:REQUESTERS-1];
+    logic [3:0]   next_wr_beat [0:REQUESTERS-1];
     logic [PARTITIONS-1:0] read_pending;
     integer read_delay [0:PARTITIONS-1];
-    logic [PARTITIONS-1:0][3:0] read_beat;
+    logic [3:0]   read_beat [0:PARTITIONS-1];
     integer cycles, blocks_done, rd_cmds, wr_beats, wr_stalls, bank_stalls, turn_stalls;
     integer bank_wait [0:PARTITIONS-1][0:BANKS-1];
     integer turn_wait [0:PARTITIONS-1];
@@ -93,13 +95,13 @@ module tb_hbm_fabric_perf #(
         rsp_ready = '1;
         mem_rd_ready = '0;
         mem_data_valid = '0;
-        mem_data_beat = read_beat;
         mem_data_last = '0;
-        mem_data = '0;
         mem_data_error = '0;
         for (int p = 0; p < PARTITIONS; p++) begin
             mem_data_valid[p] = read_pending[p] && (read_delay[p] == 0);
             mem_data_last[p] = read_pending[p] && (read_beat[p] == 4'd15);
+            mem_data_beat[p] = read_beat[p];
+            mem_data[p] = '0;
         end
         // A repeating write-ready pattern approximates controller queue
         // pressure while remaining deterministic and reproducible.
@@ -134,8 +136,6 @@ module tb_hbm_fabric_perf #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_inflight <= '0;
-            next_block <= '0;
-            next_wr_beat <= '0;
             read_pending <= '0;
             blocks_done <= 0;
             rd_cmds <= 0;
@@ -144,6 +144,10 @@ module tb_hbm_fabric_perf #(
             bank_stalls <= 0;
             turn_stalls <= 0;
             cycles <= 0;
+            for (int r = 0; r < REQUESTERS; r++) begin
+                next_block[r] <= '0;
+                next_wr_beat[r] <= '0;
+            end
             for (int p = 0; p < PARTITIONS; p++) begin
                 read_delay[p] <= 0;
                 read_beat[p] <= '0;

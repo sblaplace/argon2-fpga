@@ -36,23 +36,23 @@ module tb_argon2_multi_ctx #(
     logic all_idle;
 
     logic [PARTITIONS-1:0] mem_rd_valid, mem_rd_ready;
-    logic [PARTITIONS-1:0][CW-1:0]  mem_rd_context;
-    logic [PARTITIONS-1:0][ADDR_W-1:0] mem_rd_block_addr;
+    logic [CW-1:0]         mem_rd_context [0:PARTITIONS-1];
+    logic [ADDR_W-1:0]     mem_rd_block_addr [0:PARTITIONS-1];
     logic [PARTITIONS-1:0] mem_data_valid, mem_data_ready, mem_data_last, mem_data_error;
-    logic [PARTITIONS-1:0][3:0] mem_data_beat;
-    logic [PARTITIONS-1:0][511:0] mem_data;
+    logic [3:0]            mem_data_beat [0:PARTITIONS-1];
+    logic [511:0]          mem_data [0:PARTITIONS-1];
     logic [PARTITIONS-1:0] mem_wr_valid, mem_wr_ready, mem_wr_last;
-    logic [PARTITIONS-1:0][CW-1:0]  mem_wr_context;
-    logic [PARTITIONS-1:0][ADDR_W-1:0] mem_wr_block_addr;
-    logic [PARTITIONS-1:0][3:0] mem_wr_beat;
-    logic [PARTITIONS-1:0][511:0] mem_wr_data;
+    logic [CW-1:0]         mem_wr_context [0:PARTITIONS-1];
+    logic [ADDR_W-1:0]     mem_wr_block_addr [0:PARTITIONS-1];
+    logic [3:0]            mem_wr_beat [0:PARTITIONS-1];
+    logic [511:0]          mem_wr_data [0:PARTITIONS-1];
 
     logic [511:0] mem [0:NUM_BLOCKS-1][0:NBEAT-1];
     logic [511:0] exp [0:NBLK*NBEAT-1];
 
     logic [PARTITIONS-1:0] rd_pending;
     integer rd_lat [0:PARTITIONS-1];
-    logic [PARTITIONS-1:0][3:0] rd_beat;
+    logic [3:0] rd_beat [0:PARTITIONS-1];
     integer rd_blk [0:PARTITIONS-1];
 
     always #5 clk = ~clk;
@@ -80,24 +80,24 @@ module tb_argon2_multi_ctx #(
     );
 
     // ---- memory model ports ----------------------------------------------
-    always_comb mem_rd_ready = '1;   // accept a read command every cycle
-    always_comb mem_wr_ready = '1;   // accept a write beat every cycle
+    assign mem_rd_ready = '1;   // accept a read command every cycle
+    assign mem_wr_ready = '1;   // accept a write beat every cycle
 
     // ---- read path -------------------------------------------------------
     always_comb begin
         mem_data_valid = '0;
         mem_data_last  = '0;
-        mem_data       = '0;
         mem_data_error = '0;
-        mem_data_beat  = rd_beat;
         for (int p = 0; p < PARTITIONS; p++) begin
             mem_data_valid[p] = rd_pending[p] && (rd_lat[p] <= 0);
             mem_data_last[p]  = rd_pending[p] && (rd_lat[p] <= 0) && (rd_beat[p] == 4'd15);
+            mem_data_beat[p]  = rd_beat[p];
             mem_data[p]       = mem[rd_blk[p]][rd_beat[p]];
         end
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
+        integer ctx_p, low;
         if (!rst_n) begin
             rd_pending <= '0;
             for (int p = 0; p < PARTITIONS; p++) begin
@@ -107,7 +107,6 @@ module tb_argon2_multi_ctx #(
             end
         end else begin
             for (int p = 0; p < PARTITIONS; p++) begin
-                int ctx_p, low;
                 if (mem_rd_valid[p] && mem_rd_ready[p]) begin
                     ctx_p = mem_rd_context[p];
                     low = (p - ctx_p) & (PARTITIONS - 1);
@@ -130,9 +129,9 @@ module tb_argon2_multi_ctx #(
 
     // ---- write path ------------------------------------------------------
     always_ff @(posedge clk) begin
+        integer ctx_p, low, g;
         if (rst_n) begin
             for (int p = 0; p < PARTITIONS; p++) begin
-                int ctx_p, low, g;
                 if (mem_wr_valid[p] && mem_wr_ready[p]) begin
                     ctx_p = mem_wr_context[p];
                     low = (p - ctx_p) & (PARTITIONS - 1);
