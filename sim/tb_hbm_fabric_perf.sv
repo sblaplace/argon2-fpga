@@ -11,6 +11,7 @@
 `timescale 1ns / 1ps
 
 module tb_hbm_fabric_perf #(
+    parameter int N_P = 1,   // unused; keeps the suite's -PN_P override uniform
     parameter int REQUESTERS = 32,
     parameter int PARTITIONS = 32,
     parameter int READ_LAT   = 20,
@@ -49,15 +50,25 @@ module tb_hbm_fabric_perf #(
     logic [PARTITIONS-1:0][DW-1:0] mem_wr_data;
 
     logic [REQUESTERS-1:0] rd_inflight;
-    logic [REQUESTERS-1:0][31:0] next_block;
-    logic [REQUESTERS-1:0][3:0] next_wr_beat;
+    logic [31:0] next_block [0:REQUESTERS-1];
+    logic [3:0]  next_wr_beat [0:REQUESTERS-1];
     logic [PARTITIONS-1:0] read_pending;
-    integer read_delay [0:PARTITIONS-1];
-    logic [PARTITIONS-1:0][3:0] read_beat;
+    logic [7:0]  read_delay [0:PARTITIONS-1];
+    logic [3:0]  read_beat [0:PARTITIONS-1];
     integer cycles, blocks_done, rd_cmds, wr_beats, wr_stalls, bank_stalls, turn_stalls;
-    integer bank_wait [0:PARTITIONS-1][0:BANKS-1];
-    integer turn_wait [0:PARTITIONS-1];
-    logic last_was_write [0:PARTITIONS-1];
+    logic [3:0]  bank_wait [0:PARTITIONS-1][0:BANKS-1];
+    logic [3:0]  turn_wait [0:PARTITIONS-1];
+    logic [PARTITIONS-1:0] last_was_write;
+
+    // Unpacked copies of the fabric's block-address busses, used as bank
+    // indices below (a constant-required context Icarus cannot elaborate from
+    // a packed part-select).
+    logic [31:0] rd_blk_q [0:PARTITIONS-1];
+    logic [31:0] wr_blk_q [0:PARTITIONS-1];
+    for (genvar g = 0; g < PARTITIONS; g++) begin : g_copy
+        assign rd_blk_q[g] = mem_rd_block_addr[g];
+        assign wr_blk_q[g] = mem_wr_block_addr[g];
+    end
 
     always #5 clk = ~clk;
 
@@ -92,28 +103,26 @@ module tb_hbm_fabric_perf #(
         rsp_ready = '1;
         mem_rd_ready = '0;
         mem_data_valid = '0;
-        mem_data_ready = '0;
-        mem_data_beat = read_beat;
         mem_data_last = '0;
-        mem_data = '0;
         mem_data_error = '0;
         for (int p = 0; p < PARTITIONS; p++) begin
-            mem_data_valid[p] = read_pending[p] && (read_delay[p] == 0);
+            mem_data_valid[p] = read_pending[p] && (read_delay[p] == '0);
             mem_data_last[p] = read_pending[p] && (read_beat[p] == 4'd15);
+            mem_data_beat[p] = read_beat[p];
+            mem_data[p] = '0;
         end
         // A repeating write-ready pattern approximates controller queue
         // pressure while remaining deterministic and reproducible.
         for (int p = 0; p < PARTITIONS; p++) begin
-            mem_rd_ready[p] = ((!last_was_write[p]) || (turn_wait[p] == 0)) &&
-                               (bank_wait[p][mem_rd_block_addr[p] % BANKS] == 0);
+            mem_rd_ready[p] = ((!last_was_write[p]) || (turn_wait[p] == '0)) &&
+                               (bank_wait[p][rd_blk_q[p] % BANKS] == '0);
             // Give a read command priority when both directions are offered
             // in the same cycle. This models a controller with separate
             // ingress queues and a deterministic read-biased arbiter.
             mem_wr_ready[p] = !mem_rd_valid[p] &&
-                              (last_was_write[p] || (turn_wait[p] == 0)) &&
+                              (last_was_write[p] || (turn_wait[p] == '0)) &&
                               ((cycles + p * 3) % 11) != 0 &&
-                              (bank_wait[p][mem_wr_block_addr[p] % BANKS] == 0);
-            mem_data_ready[p] = mem_data_valid[p];
+                              (bank_wait[p][wr_blk_q[p] % BANKS] == '0);
         end
     end
 
@@ -135,8 +144,6 @@ module tb_hbm_fabric_perf #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_inflight <= '0;
-            next_block <= '0;
-            next_wr_beat <= '0;
             read_pending <= '0;
             blocks_done <= 0;
             rd_cmds <= 0;
@@ -145,13 +152,17 @@ module tb_hbm_fabric_perf #(
             bank_stalls <= 0;
             turn_stalls <= 0;
             cycles <= 0;
+            last_was_write <= '0;
+            for (int r = 0; r < REQUESTERS; r++) begin
+                next_block[r] <= '0;
+                next_wr_beat[r] <= '0;
+            end
             for (int p = 0; p < PARTITIONS; p++) begin
-                read_delay[p] <= 0;
+                read_delay[p] <= '0;
                 read_beat[p] <= '0;
+                turn_wait[p] <= '0;
                 for (int b = 0; b < BANKS; b++)
-                    bank_wait[p][b] <= 0;
-                turn_wait[p] <= 0;
-                last_was_write[p] <= 1'b0;
+                    bank_wait[p][b] <= '0;
             end
         end else begin
             cycles <= cycles + 1;
@@ -169,7 +180,7 @@ module tb_hbm_fabric_perf #(
             for (int r = 0; r < REQUESTERS; r++) begin
                 if (rd_valid[r] && rd_ready[r]) begin
                     rd_inflight[r] <= 1'b1;
-                    next_block[r] <= next_block[r] + 1;
+                    next_block[r] <= next_block[r] + 1'b1;
                     rd_cmds = rd_cmds + 1;
                 end
                 if (rsp_valid[r] && rsp_ready[r] && rsp_last[r]) begin
@@ -187,25 +198,25 @@ module tb_hbm_fabric_perf #(
 
             for (int p = 0; p < PARTITIONS; p++) begin
                 for (int b = 0; b < BANKS; b++)
-                    if (bank_wait[p][b] > 0) bank_wait[p][b] <= bank_wait[p][b] - 1;
-                if (turn_wait[p] > 0) turn_wait[p] <= turn_wait[p] - 1;
+                    if (bank_wait[p][b] != '0) bank_wait[p][b] <= bank_wait[p][b] - 1'b1;
+                if (turn_wait[p] != '0) turn_wait[p] <= turn_wait[p] - 1'b1;
                 if (mem_rd_valid[p] && !mem_rd_ready[p]) begin
-                    if (turn_wait[p] != 0) turn_stalls = turn_stalls + 1;
+                    if (turn_wait[p] != '0) turn_stalls = turn_stalls + 1;
                     else bank_stalls = bank_stalls + 1;
                 end
                 if (mem_wr_valid[p] && !mem_wr_ready[p]) begin
-                    if (turn_wait[p] != 0) turn_stalls = turn_stalls + 1;
+                    if (turn_wait[p] != '0) turn_stalls = turn_stalls + 1;
                     else bank_stalls = bank_stalls + 1;
                 end
                 if (mem_rd_valid[p] && mem_rd_ready[p]) begin
                     read_pending[p] <= 1'b1;
-                    read_delay[p] <= READ_LAT;
+                    read_delay[p] <= READ_LAT[7:0];
                     read_beat[p] <= '0;
-                    bank_wait[p][mem_rd_block_addr[p] % BANKS] <= BANK_PENALTY;
-                    turn_wait[p] <= last_was_write[p] ? RW_TURNAROUND : 0;
+                    bank_wait[p][rd_blk_q[p] % BANKS] <= BANK_PENALTY[3:0];
+                    turn_wait[p] <= last_was_write[p] ? RW_TURNAROUND[3:0] : '0;
                     last_was_write[p] <= 1'b0;
-                end else if (read_pending[p] && read_delay[p] > 0) begin
-                    read_delay[p] <= read_delay[p] - 1;
+                end else if (read_pending[p] && (read_delay[p] != '0)) begin
+                    read_delay[p] <= read_delay[p] - 1'b1;
                 end else if (read_pending[p] && mem_data_valid[p] &&
                              mem_data_ready[p] && mem_data_last[p]) begin
                     read_pending[p] <= 1'b0;
@@ -214,8 +225,8 @@ module tb_hbm_fabric_perf #(
                     read_beat[p] <= read_beat[p] + 1'b1;
                 end
                 if (mem_wr_valid[p] && mem_wr_ready[p]) begin
-                    bank_wait[p][mem_wr_block_addr[p] % BANKS] <= BANK_PENALTY;
-                    turn_wait[p] <= last_was_write[p] ? 0 : RW_TURNAROUND;
+                    bank_wait[p][wr_blk_q[p] % BANKS] <= BANK_PENALTY[3:0];
+                    turn_wait[p] <= last_was_write[p] ? '0 : RW_TURNAROUND[3:0];
                     last_was_write[p] <= 1'b1;
                 end
             end

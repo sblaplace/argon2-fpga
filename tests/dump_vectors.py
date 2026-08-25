@@ -91,6 +91,32 @@ def dump_sweep(m: int, t: int, type_: Type, stem: str) -> None:
     print(f"{stem} tag {tag.hex()}")
 
 
+def dump_multi(type_: Type, nctx: int, stem: str) -> None:
+    """Concatenated init/exp for tb_argon2_multi_ctx: nctx independent p=1
+    contexts, each with a distinct password/salt, appended in context order
+    (block-major within each context). A block misrouted by the shared fabric
+    (cross-context contamination) therefore shows up as a mismatch rather
+    than passing because all contexts hold identical data."""
+    inits: list[list[int]] = []
+    finals: list[list[int]] = []
+    for c in range(nctx):
+        kw = dict(
+            time_cost=2,
+            memory_cost=8,
+            parallelism=1,
+            hash_len=32,
+            type_=type_,
+        )
+        pwd = f"password-{c}".encode()
+        salt = f"somesalt-{c}".encode()
+        init = argon2_init_memory(pwd, salt, **kw)
+        tag, final = argon2_fill(pwd, salt, **kw)
+        inits.extend(init)
+        finals.extend(final)
+    write_mem_hex(GEN / f"{stem}_init.hex", inits)
+    write_mem_hex(GEN / f"{stem}_exp.hex", finals)
+
+
 def dump_p4(m: int, t: int, type_: Type, stem: str) -> None:
     """p=4 KAT at an arbitrary geometry for the partitioned-memory bench
     (tb_argon2_p4): four controllers + the read crossbar + four LOCAL
@@ -138,6 +164,8 @@ def main() -> None:
     dump_fill(Type.I, "fill_i")
     dump_fill(Type.D, "fill_d")
     dump_fill(Type.ID, "fill_id")
+    for tn, tt in (("i", Type.I), ("d", Type.D), ("id", Type.ID)):  # tb_argon2_multi_ctx
+        dump_multi(tt, 32, f"multi_{tn}")
     dump_sweep(128, 3, Type.I, "bigfill_i")   # tb_argon2_axi_big
     dump_sweep(128, 3, Type.D, "bigfill_d")
     dump_sweep(128, 3, Type.ID, "bigfill_id")

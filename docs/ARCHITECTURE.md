@@ -156,6 +156,9 @@ G so address generation of the next window can later overlap a fill.
 | `argon2_index`, `argon2_ref_area` | Written |
 | `argon2_fill_ctrl` | One-lane job: argon2i/d/id, dest-xor fetch, ref prefetch, slice-sync ports |
 | `argon2_fill_job` | p lanes + AND barrier at each slice |
+| `argon2_block_fabric` | Tagged 1 KiB block reads/writes striped across power-of-two partitions; single-command-slot baseline for the HBM fabric |
+| `argon2_ctx_lane` | One `argon2_fill_ctrl` + adapter to the fabric's tagged requester port (context id + global base, write beat counter) |
+| `argon2_multi_ctx` | Many-context scheduler: `LANES` lanes round-robined over independent p=1 contexts through one shared fabric |
 | `argon2_addr_gen` (argon2i PRNG) | Two G's in counter mode, 128 J1∥J2 / window |
 | `argon2_axi_mm` / `argon2_fill_axi` | 512-bit AXI4-MM, 16-beat / 1 KiB block, independent R/W |
 | F1 `cl_dram_dma` / `sh_ddr` shell | Scaffold: four independent p=1 channels; p4 barrier present, cross-channel reference router missing |

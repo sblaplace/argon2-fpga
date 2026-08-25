@@ -34,7 +34,8 @@ SIM_DIR = os.path.join(ROOT, "sim")
 PASS_MARKER = "PASS"
 
 SIM_TARGETS = ["blake2b", "blamka", "index", "compress", "addr",
-               "fill", "discipline", "rfc", "p4", "axi", "axibig", "sweep", "cl"]
+               "fill", "discipline", "rfc", "p4", "axi", "axibig", "sweep",
+               "fabric", "multi", "cl"]
 PER_TARGET_TIMEOUT = 300  # seconds; the geometry sweep is the long pole
 # (~30 s on Verilator NP=1; Icarus/vvp is several times slower)
 # N_P matrix: run the whole suite at every value in N_P_MATRIX (the Makefile
@@ -102,7 +103,7 @@ def run_streaming(cmd, cwd, timeout, label, require_pass):
     if rc != 0:
         print(f"\n[FAIL] {label}: exit code {rc}\n")
         gh_annotation("error", f"EXIT {rc}: {label}",
-                      out[-800:])
+                      out[-16000:])
         return False
     if require_pass and PASS_MARKER not in out:
         print(f"\n[FAIL] {label}: output did not contain '{PASS_MARKER}'\n")

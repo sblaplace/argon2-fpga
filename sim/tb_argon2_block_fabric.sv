@@ -4,10 +4,90 @@
 // The partition model adds a small, different latency per partition and holds
 // response beats until the fabric accepts them.  This exercises tagging,
 // partition mapping, arbitration, backpressure, and ordered 16-beat bursts.
+//
+// The partition memory is a small module (tb_fabric_ram) with a registered
+// latency/beat pipeline, one instance per partition, connected through
+// genvar-constant selects into the fabric's packed busses — the same shape as
+// tb_argon2_p4 / argon2_mem_xbar, which is what Icarus elaborates cleanly.
 
 `timescale 1ns / 1ps
 
-module tb_argon2_block_fabric;
+// One partition's memory: synthesizes a deterministic response word from the
+// accepted (context, local_addr, partition, beat), after RD_LAT cycles.
+module tb_fabric_ram #(
+    parameter int P_IDX  = 0,
+    parameter int RD_LAT = 1
+) (
+    input  logic        clk,
+    input  logic        rst_n,
+    input  logic        rd_valid,
+    output logic        rd_ready,
+    input  logic [15:0] rd_context,
+    input  logic [31:0] rd_addr,
+    output logic        data_valid,
+    input  logic        data_ready,
+    output logic [3:0]  data_beat,
+    output logic        data_last,
+    output logic [511:0] data
+);
+    logic        pending;
+    logic [7:0]  delay;
+    logic [3:0]  beat;
+    logic [15:0] saved_context;
+    logic [31:0] saved_addr;
+
+    function automatic [511:0] expected_data(
+        input logic [15:0] ctx,
+        input logic [31:0] local_addr,
+        input integer p,
+        input integer b
+    );
+        begin
+            expected_data = '0;
+            expected_data[15:0] = ctx;
+            expected_data[31:16] = local_addr[15:0];
+            expected_data[35:32] = b[3:0];
+            expected_data[43:40] = p[3:0];
+        end
+    endfunction
+
+    assign rd_ready = !pending;
+
+    always_comb begin
+        data_valid = pending && (delay == '0);
+        data_last  = pending && (beat == 4'd15);
+        data_beat  = beat;
+        data       = expected_data(saved_context, saved_addr, P_IDX, beat);
+    end
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pending       <= 1'b0;
+            delay         <= '0;
+            beat          <= '0;
+            saved_context <= '0;
+            saved_addr    <= '0;
+        end else begin
+            if (rd_valid && rd_ready) begin
+                pending       <= 1'b1;
+                delay         <= RD_LAT[7:0];
+                beat          <= '0;
+                saved_context <= rd_context;
+                saved_addr    <= rd_addr;
+            end else if (pending && (delay != '0)) begin
+                delay <= delay - 1'b1;
+            end else if (pending && data_valid && data_ready && data_last) begin
+                pending <= 1'b0;
+            end else if (pending && data_valid && data_ready) begin
+                beat <= beat + 1'b1;
+            end
+        end
+    end
+endmodule
+
+module tb_argon2_block_fabric #(
+    parameter int N_P = 1   // unused; keeps the suite's -PN_P override uniform
+);
     localparam int RQ = 8;
     localparam int PP = 8;
     localparam int DW = 512;
@@ -38,12 +118,8 @@ module tb_argon2_block_fabric;
     logic [PP-1:0][3:0] mem_wr_beat;
     logic [PP-1:0][DW-1:0] mem_wr_data;
 
-    logic [PP-1:0] pending;
-    logic [PP-1:0][2:0] delay;
-    logic [PP-1:0][3:0] beat;
-    logic [PP-1:0][15:0] saved_context;
-    logic [PP-1:0][31:0] saved_addr;
-    integer got;
+    logic [RQ-1:0] got_done;   // per-requester completion, set on last beat
+    integer rsp_cnt;
 
     always #5 clk = ~clk;
 
@@ -72,95 +148,93 @@ module tb_argon2_block_fabric;
         .mem_wr_beat(mem_wr_beat), .mem_wr_last(mem_wr_last), .mem_wr_data(mem_wr_data)
     );
 
+    // One partition model per partition, wired with constant selects.
+    generate
+        for (genvar g = 0; g < PP; g++) begin : g_ram
+            tb_fabric_ram #(.P_IDX(g), .RD_LAT(g[2:0] + 1)) ram (
+                .clk(clk), .rst_n(rst_n),
+                .rd_valid(mem_rd_valid[g]), .rd_ready(mem_rd_ready[g]),
+                .rd_context(mem_rd_context[g]), .rd_addr(mem_rd_block_addr[g]),
+                .data_valid(mem_data_valid[g]), .data_ready(mem_data_ready[g]),
+                .data_beat(mem_data_beat[g]), .data_last(mem_data_last[g]),
+                .data(mem_data[g])
+            );
+        end
+    endgenerate
+
+    // The fabric's write side is unused in this bench: accept everything,
+    // and never report an error beat.
+    assign mem_wr_ready = '1;
+    assign mem_data_error = '0;
+
+    // The bench reconstructs the expected response word independently.
     function automatic [511:0] expected_data(
-        input logic [15:0] context,
+        input logic [15:0] ctx,
         input logic [31:0] local_addr,
         input integer p,
         input integer b
     );
         begin
             expected_data = '0;
-            expected_data[15:0] = context;
+            expected_data[15:0] = ctx;
             expected_data[31:16] = local_addr[15:0];
             expected_data[35:32] = b[3:0];
             expected_data[43:40] = p[3:0];
         end
     endfunction
 
-    always_comb begin
-        mem_rd_ready = '1;
-        mem_data_valid = pending && (delay == '0);
-        mem_data_ready = '0;
-        mem_data_beat = beat;
-        mem_data_last = pending && (beat == 4'd15);
-        mem_data_error = '0;
-        mem_data = '0;
-        for (int p = 0; p < PP; p++) begin
-            mem_data[p] = expected_data(saved_context[p], saved_addr[p], p, beat[p]);
-        end
-    end
-
+    // Deliberately apply a deterministic response backpressure pattern: one
+    // requester in three is held for a beat, rotating on a free-running
+    // counter. Tying the pattern to completion would deadlock — a held last
+    // beat can't complete, which keeps it held — so the rotation is time
+    // based instead, guaranteeing every burst eventually drains.
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            pending <= '0;
-            delay <= '0;
-            beat <= '0;
-            saved_context <= '0;
-            saved_addr <= '0;
-        end else begin
-            for (int p = 0; p < PP; p++) begin
-                if (mem_rd_valid[p] && mem_rd_ready[p]) begin
-                    pending[p] <= 1'b1;
-                    delay[p] <= p[2:0] + 3'd1;
-                    beat[p] <= 4'd0;
-                    saved_context[p] <= mem_rd_context[p];
-                    saved_addr[p] <= mem_rd_block_addr[p];
-                end else if (pending[p] && (delay[p] != 0)) begin
-                    delay[p] <= delay[p] - 1'b1;
-                end else if (pending[p] && mem_data_valid[p] &&
-                             mem_data_ready[p] && mem_data_last[p]) begin
-                    pending[p] <= 1'b0;
-                end else if (pending[p] && mem_data_valid[p] &&
-                             mem_data_ready[p]) begin
-                    beat[p] <= beat[p] + 1'b1;
-                end
-            end
-        end
+        if (!rst_n) rsp_cnt <= 0;
+        else        rsp_cnt <= rsp_cnt + 1;
     end
 
-    // Deliberately apply a deterministic response backpressure pattern.
     always_comb begin
         rsp_ready = '0;
         for (int r = 0; r < RQ; r++)
-            rsp_ready[r] = ((r + got) % 3) != 1;
+            rsp_ready[r] = ((r + rsp_cnt) % 3) != 1;
     end
 
-    always_ff @(posedge clk) begin
-        if (rst_n) begin
-            for (int r = 0; r < RQ; r++) begin
-                if (rsp_valid[r] && rsp_ready[r]) begin
-                    if (rsp_error[r] || rsp_context[r] !== rd_context[r] ||
-                        rsp_request[r] !== rd_request[r] ||
-                        rsp_data[r] !== expected_data(rd_context[r], rd_block_addr[r] >> 3,
-                                                     (rd_context[r] + rd_block_addr[r]) & (PP - 1), rsp_beat[r])) begin
-                        $display("FAIL response requester=%0d beat=%0d", r, rsp_beat[r]);
+    // Per-requester response checker, wired with constant selects.
+    generate
+        for (genvar g = 0; g < RQ; g++) begin : g_chk
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    got_done[g] <= 1'b0;
+                else if (rsp_valid[g] && rsp_ready[g]) begin
+                    if (rsp_error[g] || rsp_context[g] !== rd_context[g] ||
+                        rsp_request[g] !== rd_request[g] ||
+                        rsp_data[g] !== expected_data(rd_context[g], rd_block_addr[g] >> 3,
+                                                      (rd_context[g] + rd_block_addr[g]) & (PP - 1),
+                                                      rsp_beat[g])) begin
+                        $display("FAIL response requester=%0d beat=%0d", g, rsp_beat[g]);
                         $finish;
                     end
-                    if (rsp_last[r] !== (rsp_beat[r] == 4'd15)) begin
-                        $display("FAIL last requester=%0d beat=%0d", r, rsp_beat[r]);
+                    if (rsp_last[g] !== (rsp_beat[g] == 4'd15)) begin
+                        $display("FAIL last requester=%0d beat=%0d", g, rsp_beat[g]);
                         $finish;
                     end
-                    if (rsp_last[r]) got <= got + 1;
+                    if (rsp_last[g]) got_done[g] <= 1'b1;
                 end
             end
         end
-    end
+    endgenerate
 
     task automatic send_request(input integer r);
         begin
-            rd_context[r] = 16'(16'h1200 + r * 16'h31);
+            // Distinct context and a block whose partition = (ctx + block)
+            // & (PP-1) lands on r: ctx = 0x1000 + r, block = 8*r gives
+            // partition r and local address r. Spreading requesters across
+            // partitions keeps an independent response stream per partition,
+            // so the deliberate rsp_ready backpressure below cannot deadlock
+            // a single outstanding burst.
+            rd_context[r] = 16'(16'h1000 + r);
             rd_request[r] = 16'(16'h4000 + r);
-            rd_block_addr[r] = 32'(3 + r * 7);
+            rd_block_addr[r] = 32'(8 * r);
             rd_valid[r] = 1'b1;
             while (!rd_ready[r]) @(posedge clk);
             @(posedge clk);
@@ -181,16 +255,15 @@ module tb_argon2_block_fabric;
         wr_beat = '0;
         wr_last = '0;
         wr_data = '0;
-        mem_wr_ready = '1;
-        got = 0;
+        got_done = '0;
         repeat (4) @(posedge clk);
         rst_n = 1'b1;
 
         for (int r = 0; r < RQ; r++)
             send_request(r);
 
-        wait (got == RQ);
-        $display("tb_argon2_block_fabric: PASS (%0d tagged 16-beat reads)", got);
+        wait (&got_done);
+        $display("tb_argon2_block_fabric: PASS (%0d tagged 16-beat reads)", RQ);
         $finish;
     end
 endmodule
