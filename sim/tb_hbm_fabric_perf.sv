@@ -11,6 +11,7 @@
 `timescale 1ns / 1ps
 
 module tb_hbm_fabric_perf #(
+    parameter int N_P = 1,   // unused; keeps the suite's -PN_P override uniform
     parameter int REQUESTERS = 32,
     parameter int PARTITIONS = 32,
     parameter int READ_LAT   = 20,
@@ -92,7 +93,6 @@ module tb_hbm_fabric_perf #(
         rsp_ready = '1;
         mem_rd_ready = '0;
         mem_data_valid = '0;
-        mem_data_ready = '0;
         mem_data_beat = read_beat;
         mem_data_last = '0;
         mem_data = '0;
@@ -113,7 +113,6 @@ module tb_hbm_fabric_perf #(
                               (last_was_write[p] || (turn_wait[p] == 0)) &&
                               ((cycles + p * 3) % 11) != 0 &&
                               (bank_wait[p][mem_wr_block_addr[p] % BANKS] == 0);
-            mem_data_ready[p] = mem_data_valid[p];
         end
     end
 

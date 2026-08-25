@@ -140,10 +140,22 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
 - [ ] Add an owner-channel read crossbar before enabling a single p>1 job
       across physically partitioned memories; Argon2 references other lanes,
       so a barrier alone is insufficient.
-- [ ] **HBM4/custom-package architecture:** define the many-context,
+- [x] **HBM4/custom-package architecture:** define the many-context,
       bank-aware memory fabric and ASIC scaling target. The design proposal,
       bandwidth model, tagged block interface, and staged implementation plan
       are in [`docs/HBM4_ARCHITECTURE.md`](docs/HBM4_ARCHITECTURE.md).
+- [x] **Tagged block fabric** (`argon2_block_fabric`): the correctness-first
+      baseline for the many-context memory system — tagged 1 KiB reads, 16-beat
+      response routing, rotating per-partition arbitration, a backpressured
+      write stream, and the reversible power-of-two block mapping. Self-checked
+      by `tb_argon2_block_fabric` and throughput-modeled by
+      `tb_hbm_fabric_perf` (`make -C sim fabric hbmperf hbmperf-sweep`).
+- [x] **Many-context scheduler** (`argon2_multi_ctx` + `argon2_ctx_lane`): a
+      pool of compute lanes round-robined over independent p=1 contexts, with
+      every read/write tagged by context id and striped through one shared
+      block fabric. `tb_argon2_multi_ctx` runs 32 contexts (distinct
+      passwords) through a data-storing HBM model and compares each context's
+      final working set against the Python reference (`make -C sim multi`).
 
 ## Tree
 

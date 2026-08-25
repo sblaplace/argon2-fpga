@@ -7,7 +7,9 @@
 
 `timescale 1ns / 1ps
 
-module tb_argon2_block_fabric;
+module tb_argon2_block_fabric #(
+    parameter int N_P = 1   // unused; keeps the suite's -PN_P override uniform
+);
     localparam int RQ = 8;
     localparam int PP = 8;
     localparam int DW = 512;
@@ -44,6 +46,7 @@ module tb_argon2_block_fabric;
     logic [PP-1:0][15:0] saved_context;
     logic [PP-1:0][31:0] saved_addr;
     integer got;
+    integer rsp_cnt;
 
     always #5 clk = ~clk;
 
@@ -73,14 +76,14 @@ module tb_argon2_block_fabric;
     );
 
     function automatic [511:0] expected_data(
-        input logic [15:0] context,
+        input logic [15:0] ctx,
         input logic [31:0] local_addr,
         input integer p,
         input integer b
     );
         begin
             expected_data = '0;
-            expected_data[15:0] = context;
+            expected_data[15:0] = ctx;
             expected_data[31:16] = local_addr[15:0];
             expected_data[35:32] = b[3:0];
             expected_data[43:40] = p[3:0];
@@ -89,13 +92,14 @@ module tb_argon2_block_fabric;
 
     always_comb begin
         mem_rd_ready = '1;
-        mem_data_valid = pending && (delay == '0);
-        mem_data_ready = '0;
+        mem_data_valid = '0;
         mem_data_beat = beat;
-        mem_data_last = pending && (beat == 4'd15);
+        mem_data_last = '0;
         mem_data_error = '0;
         mem_data = '0;
         for (int p = 0; p < PP; p++) begin
+            mem_data_valid[p] = pending[p] && (delay[p] == '0);
+            mem_data_last[p]  = pending[p] && (beat[p] == 4'd15);
             mem_data[p] = expected_data(saved_context[p], saved_addr[p], p, beat[p]);
         end
     end
@@ -128,11 +132,20 @@ module tb_argon2_block_fabric;
         end
     end
 
-    // Deliberately apply a deterministic response backpressure pattern.
+    // Deliberately apply a deterministic response backpressure pattern: one
+    // requester in three is held for a beat, rotating on a free-running
+    // counter. Tying the pattern to `got` would deadlock — a held last beat
+    // can't advance `got`, which keeps it held — so the rotation is time
+    // based instead, guaranteeing every burst eventually drains.
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) rsp_cnt <= 0;
+        else        rsp_cnt <= rsp_cnt + 1;
+    end
+
     always_comb begin
         rsp_ready = '0;
         for (int r = 0; r < RQ; r++)
-            rsp_ready[r] = ((r + got) % 3) != 1;
+            rsp_ready[r] = ((r + rsp_cnt) % 3) != 1;
     end
 
     always_ff @(posedge clk) begin
@@ -158,9 +171,15 @@ module tb_argon2_block_fabric;
 
     task automatic send_request(input integer r);
         begin
-            rd_context[r] = 16'(16'h1200 + r * 16'h31);
+            // Distinct context and a block whose partition = (ctx + block)
+            // & (PP-1) lands on r: ctx = 0x1000 + r, block = 8*r gives
+            // partition r and local address r. Spreading requesters across
+            // partitions keeps an independent response stream per partition,
+            // so the deliberate rsp_ready backpressure below cannot deadlock
+            // a single outstanding burst.
+            rd_context[r] = 16'(16'h1000 + r);
             rd_request[r] = 16'(16'h4000 + r);
-            rd_block_addr[r] = 32'(3 + r * 7);
+            rd_block_addr[r] = 32'(8 * r);
             rd_valid[r] = 1'b1;
             while (!rd_ready[r]) @(posedge clk);
             @(posedge clk);

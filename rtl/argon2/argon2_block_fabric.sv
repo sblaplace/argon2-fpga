@@ -79,6 +79,7 @@ module argon2_block_fabric #(
     output logic [PARTITIONS-1:0][DATA_W-1:0]             mem_wr_data
 );
     localparam int PART_W = (PARTITIONS <= 1) ? 1 : $clog2(PARTITIONS);
+    localparam int RW     = (REQUESTERS <= 1) ? 1 : $clog2(REQUESTERS);
 
     // This baseline deliberately uses a power-of-two mapping.  A non-power
     // of two configuration would make the shift-based local address wrong.
@@ -88,12 +89,12 @@ module argon2_block_fabric #(
     end
 
     function automatic logic [PART_W-1:0] map_partition(
-        input logic [CONTEXT_W-1:0] context,
+        input logic [CONTEXT_W-1:0] ctx,
         input logic [ADDR_W-1:0] block
     );
         logic [ADDR_W:0] mixed;
         begin
-            mixed = {1'b0, block} + {{(ADDR_W+1-CONTEXT_W){1'b0}}, context};
+            mixed = {1'b0, block} + {{(ADDR_W+1-CONTEXT_W){1'b0}}, ctx};
             map_partition = mixed[PART_W-1:0];
         end
     endfunction
@@ -115,32 +116,42 @@ module argon2_block_fabric #(
     logic [PARTITIONS-1:0][CONTEXT_W-1:0] cmd_context;
     logic [PARTITIONS-1:0][REQUEST_W-1:0] cmd_request;
     logic [PARTITIONS-1:0][ADDR_W-1:0] cmd_addr;
+    logic [PARTITIONS-1:0][REQUESTERS-1:0] cmd_owner;
     logic [PARTITIONS-1:0] active;
     logic [PARTITIONS-1:0][CONTEXT_W-1:0] active_context;
     logic [PARTITIONS-1:0][REQUEST_W-1:0] active_request;
     logic [PARTITIONS-1:0][REQUESTERS-1:0] active_owner;
-    logic [PARTITIONS-1:0][REQUESTERS-1:0] rr_onehot;
+    logic [PARTITIONS-1:0][RW-1:0] rr;          // round-robin start index (reads)
 
     logic [REQUESTERS-1:0] requester_busy;
 
+    // A requester is busy from command issue until its response stream ends:
+    // while its command sits in a partition's command slot (cmd_owner) or
+    // while its response beats are returning (active_owner). A partition
+    // holds a single outstanding request end-to-end (command then response),
+    // so cmd_valid and active are never set at once; the two owner words
+    // exist only to carry the owner across the cmd_valid -> active handoff
+    // without a combinational path through the grant.
     always_comb begin
         requester_busy = '0;
         for (int p = 0; p < PARTITIONS; p++) begin
-            if (cmd_valid[p] || active[p]) begin
+            if (cmd_valid[p])
+                for (int r = 0; r < REQUESTERS; r++)
+                    if (cmd_owner[p][r]) requester_busy[r] = 1'b1;
+            if (active[p])
                 for (int r = 0; r < REQUESTERS; r++)
                     if (active_owner[p][r]) requester_busy[r] = 1'b1;
-            end
         end
         for (int r = 0; r < REQUESTERS; r++)
             rd_ready[r] = !q_valid[r] && !requester_busy[r];
     end
 
     // Choose at most one queued requester for each partition.  The rotating
-    // one-hot pointer prevents a permanently ready low-numbered requester
-    // from starving other contexts.
+    // start index prevents a permanently ready low-numbered requester from
+    // starving other contexts.
     logic [PARTITIONS-1:0][REQUESTERS-1:0] grant;
     logic [PARTITIONS-1:0][REQUESTERS-1:0] wr_grant;
-    logic [PARTITIONS-1:0][REQUESTERS-1:0] wr_rr_onehot;
+    logic [PARTITIONS-1:0][RW-1:0] wr_rr;
     always_comb begin
         grant = '0;
         wr_grant = '0;
@@ -153,21 +164,24 @@ module argon2_block_fabric #(
         mem_wr_data = '0;
         for (int p = 0; p < PARTITIONS; p++) begin
             logic found;
+            int start;
             found = 1'b0;
+            start = int'(rr[p]);
             for (int off = 0; off < REQUESTERS; off++) begin
                 int r;
-                r = (rr_onehot[p] + off) % REQUESTERS;
+                r = (start + off) % REQUESTERS;
                 if (!found && q_valid[r] && !requester_busy[r] &&
-                    (map_partition(q_context[r], q_addr[r]) == p) begin
+                    (map_partition(q_context[r], q_addr[r]) == p)) begin
                     grant[p][r] = 1'b1;
                     found = 1'b1;
                 end
             end
 
             found = 1'b0;
+            start = int'(wr_rr[p]);
             for (int off = 0; off < REQUESTERS; off++) begin
                 int r;
-                r = (wr_rr_onehot[p] + off) % REQUESTERS;
+                r = (start + off) % REQUESTERS;
                 if (!found && wr_valid[r] &&
                     (map_partition(wr_context[r], wr_block_addr[r]) == p)) begin
                     wr_grant[p][r] = 1'b1;
@@ -219,10 +233,11 @@ module argon2_block_fabric #(
         if (!rst_n) begin
             q_valid       <= '0;
             cmd_valid     <= '0;
+            cmd_owner     <= '0;
             active        <= '0;
             active_owner  <= '0;
-            rr_onehot     <= '0;
-            wr_rr_onehot  <= '0;
+            rr            <= '0;
+            wr_rr         <= '0;
             for (int r = 0; r < REQUESTERS; r++) begin
                 q_context[r] <= '0;
                 q_request[r] <= '0;
@@ -234,10 +249,6 @@ module argon2_block_fabric #(
                 cmd_addr[p]      <= '0;
                 active_context[p] <= '0;
                 active_request[p] <= '0;
-                if (p < REQUESTERS) begin
-                    rr_onehot[p] <= {{(REQUESTERS-1){1'b0}}, 1'b1};
-                    wr_rr_onehot[p] <= {{(REQUESTERS-1){1'b0}}, 1'b1};
-                end
             end
         end else begin
             for (int r = 0; r < REQUESTERS; r++) begin
@@ -262,33 +273,30 @@ module argon2_block_fabric #(
                 if (cmd_fire)
                     cmd_valid[p] <= 1'b0;
 
-                if ((!cmd_valid[p] || cmd_fire) && !active[p]) begin
+                if (!cmd_valid[p] && !active[p]) begin
                     for (int r = 0; r < REQUESTERS; r++) begin
                         if (grant[p][r]) begin
                             cmd_valid[p]   <= 1'b1;
                             cmd_context[p] <= q_context[r];
                             cmd_request[p] <= q_request[r];
                             cmd_addr[p]    <= map_local_addr(q_addr[r]);
-                            active_owner[p] <= ({{(REQUESTERS-1){1'b0}}, 1'b1} << r);
+                            cmd_owner[p]   <= ({{(REQUESTERS-1){1'b0}}, 1'b1} << r);
                             q_valid[r]     <= 1'b0;
-                            rr_onehot[p]   <= (r == REQUESTERS-1) ?
-                                               {{(REQUESTERS-1){1'b0}}, 1'b1} :
-                                               ({{(REQUESTERS-1){1'b0}}, 1'b1} << (r + 1));
+                            rr[p]          <= RW'((r == REQUESTERS-1) ? 0 : r + 1);
                         end
                     end
                 end
 
                 if (cmd_fire) begin
                     active[p]         <= 1'b1;
+                    active_owner[p]   <= cmd_owner[p];
                     active_context[p] <= cmd_context[p];
                     active_request[p] <= cmd_request[p];
                 end
 
                 for (int r = 0; r < REQUESTERS; r++) begin
                     if (wr_grant[p][r] && mem_wr_ready[p])
-                        wr_rr_onehot[p] <= (r == REQUESTERS-1) ?
-                                           {{(REQUESTERS-1){1'b0}}, 1'b1} :
-                                           ({{(REQUESTERS-1){1'b0}}, 1'b1} << (r + 1));
+                        wr_rr[p] <= RW'((r == REQUESTERS-1) ? 0 : r + 1);
                 end
             end
         end

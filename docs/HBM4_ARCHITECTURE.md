@@ -268,19 +268,34 @@ cand/s. Peak HBM bandwidth alone is not a result.
 ## Immediate implementation sequence
 
 1. Extract a generic tagged block-memory interface from `argon2_fill_axi`.
-   The first RTL baseline is now `rtl/argon2/argon2_block_fabric.sv`: it
+   The first RTL baseline is `rtl/argon2/argon2_block_fabric.sv`: it
    provides tagged 1 KiB reads, 16-beat response routing, rotating
    per-partition arbitration, a backpressured write stream, and a reversible
-   power-of-two block mapping.
+   power-of-two block mapping. It is a single-command-slot baseline: one
+   outstanding block request per requester, end-to-end (command, then the
+   16-beat response), with the owner carried across the `cmd_valid -> active`
+   handoff by a dedicated `cmd_owner` register so a following command cannot
+   misroute the returning beats.
 2. Build a parameterized `argon2_mem_fabric` behavioral model with 1, 4, 8,
-   and 32 partitions. The first timing model is available as
-   `sim/tb_hbm_fabric_perf.sv` and runs with `make -C sim hbmperf`; it models
-   independent partition read latency, bank cooldown/conflicts, separate read
-   and write ingress, read-biased arbitration, and configurable read/write
-   turnaround. `make -C sim hbmperf-sweep` runs 8, 16, and 32 partition points;
+   and 32 partitions. The timing model is `sim/tb_hbm_fabric_perf.sv` and
+   runs with `make -C sim hbmperf`; it models independent partition read
+   latency, bank cooldown/conflicts, separate read and write ingress,
+   read-biased arbitration, and configurable read/write turnaround.
+   `make -C sim hbmperf-sweep` runs 8, 16, and 32 partition points;
    `FABRIC_BANKS`, `FABRIC_LAT`, `FABRIC_TURN`, and `BANK_PENALTY` expose the
-   model knobs.
-3. Add a context scheduler around the existing `argon2_fill_ctrl`.
+   model knobs. The functional self-check is `sim/tb_argon2_block_fabric.sv`
+   (`make -C sim fabric`).
+3. Add a context scheduler around the existing `argon2_fill_ctrl`. This now
+   exists: `rtl/argon2/argon2_multi_ctx.sv` instantiates a pool of `LANES`
+   compute lanes (`rtl/argon2/argon2_ctx_lane.sv`, each wrapping one
+   bit-identical `argon2_fill_ctrl`) and round-robins idle lanes over pending
+   independent p=1 contexts. A context is a descriptor (passes, lane_length,
+   memory blocks, type, and a global block base); every block read/write is
+   tagged with the context id and routed through one shared
+   `argon2_block_fabric`. `sim/tb_argon2_multi_ctx.sv` runs `CONTEXTS` (32 by
+   default) contexts with distinct passwords through a data-storing
+   per-partition-latency HBM model and compares each context's final working
+   set against the Python reference (`make -C sim multi`).
 4. Reuse `argon2_mem_xbar` for the first `p=4` implementation.
 5. Add a cycle-accurate HBM-like timing model and a `cand/s` sweep bench.
 6. Only after those tests pass, add HBM-native width adaptation and FPGA
