@@ -193,7 +193,9 @@ run-tb_perf: tb_perf.out
 	$(VVP) $<
 
 tb_ddr4_ceiling.out: tb_ddr4_ceiling.sv tb_ddr4_ram.sv
-	$(IVERILOG) -g2012 -PNBLK=$(CEIL_BLKS) -PNRD=$(CEIL_NRD) -PNWR=$(CEIL_NWR) -POUTSTANDING=$(CEIL_OUT) -PNCOMP=$(CEIL_NCOMP) -PPERF_MHZ=$(CEIL_MHZ) -PLANE_CAND=$(CEIL_LANE) -I$(INCDIR) -o $@ $< $(SRC_tb_ddr4_ceiling)
+	@# LANE_CAND is report-only and a `real` parameter; iverilog -P overrides
+	@# are integer-only, so the Icarus build uses the module default (1.044).
+	$(IVERILOG) -g2012 -PNBLK=$(CEIL_BLKS) -PNRD=$(CEIL_NRD) -PNWR=$(CEIL_NWR) -POUTSTANDING=$(CEIL_OUT) -PNCOMP=$(CEIL_NCOMP) -PPERF_MHZ=$(CEIL_MHZ) -I$(INCDIR) -o $@ $< $(SRC_tb_ddr4_ceiling)
 
 run-tb_ddr4_ceiling: tb_ddr4_ceiling.out
 	$(VVP) $<
