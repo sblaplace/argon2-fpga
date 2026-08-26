@@ -156,6 +156,15 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       block fabric. `tb_argon2_multi_ctx` runs 32 contexts (distinct
       passwords) through a data-storing HBM model and compares each context's
       final working set against the Python reference (`make -C sim multi`).
+- [x] **Per-channel capacity ceiling** (`sim/tb_ddr4_ceiling.sv`): a
+      saturating AXI master on the same cycle-accurate DDR4-2400 model, at the
+      argon2 traffic mix. Measured: one channel serves **~4.4 M
+      block-compressions/s** (1.41 cand/s for the 1 GiB / t=3 job) — but only
+      with **2 reads in flight**; at 1 in flight it serves 1.004, i.e. a single
+      lane already sits at its channel's capacity. Also measures the real
+      traffic constant: **8.6 GB per candidate**, not the 12 GB the HBM4 plan
+      assumes. Ranked levers and the two fabric blockers for sharing a channel
+      between contexts: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 ## Tree
 
@@ -179,6 +188,7 @@ make sim-np8                           # full sim suite at the N_P=8 performance
 make sim-verilator-np8                 # same full suite at N_P=8 on Verilator
 make perf-verilator                    # DDR4 perf bench on Verilator (default PERF_NP=1)
 make perf-verilator-np8                # DDR4 perf bench on Verilator at PERF_NP=8
+make -C sim SIM=verilator ddrceil      # per-channel capacity ceiling (saturating master)
 ./fpga/f1/build.sh sim --np 8          # 4-channel CL bench at the same N_P=8 point
 ./fpga/f1/build.sh emit-top --np 8     # generate a self-contained HDK top wrapper
 ```

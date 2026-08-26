@@ -32,6 +32,14 @@ channel: 12.8 GB/s and approximately 1.0 candidate/s. This implies an
 initial planning estimate of about 12 GB of DRAM traffic per candidate for
 the repository's 1 GiB / `t=3` projection.
 
+> **Measured correction (see `docs/PERFORMANCE.md`, "Traffic per
+> candidate"):** the actual traffic is **2739 B per compression = 8.6 GB per
+> 1 GiB / `t=3` candidate** (one 1 KiB reference read + one 1 KiB write per
+> compression, plus a 1 KiB dest read on two of three passes). The 12 GB
+> figure below is therefore ~1.4× conservative; multiply the table's cand/s
+> by ~1.39 (one stack: ~232 cand/s peak, ~162 at 70% usable). The table is
+> left as written so the original planning arithmetic stays traceable.
+
 ```text
 ideal_candidates_per_second = usable_memory_bytes_per_second / traffic_per_candidate
 ```
