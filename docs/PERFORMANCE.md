@@ -487,6 +487,109 @@ data-dependent ordering does not permit. A second outstanding read on the
 same AXI port is not that mechanism. Code was reverted; this note is kept
 so the experiment isn't repeated.
 
+## Per-channel ceiling: how much room does one DDR4 channel have?
+
+Every number above is *one lane on one channel*. Before adding lanes, this
+answers the prior question: what can the channel itself serve? `tb_perf`'s
+DDR4 phase reports the port only ~51% busy, which reads like 2× headroom —
+it is not. Measured with `sim/tb_ddr4_ceiling.sv`
+(`make -C sim SIM=verilator ddrceil`), which drives the same
+`tb_ddr4_ram` model with a saturating AXI master at the argon2 traffic mix
+(5 read bursts : 3 write bursts = t=3; LFSR-random read blocks, sequential
+writes, up to `CEIL_OUT` reads in flight):
+
+| reads in flight | cyc/compression | Mblk/s | cand/s per channel | port busy | AXI traffic |
+|-----------------|-----------------|--------|--------------------|-----------|-------------|
+| 1               | 63.4            | 3.157  | 1.004              | 69.8%     | 8.62 GB/s   |
+| **2**           | **45.1**        | 4.437  | **1.410**          | 87.9%     | 12.11 GB/s  |
+| 3               | 47.4            | 4.220  | 1.341              | 67.3%     | 11.52 GB/s  |
+| 4               | 47.5            | 4.213  | 1.339              | 67.2%     | 11.51 GB/s  |
+| 4 @ 250 MHz     | 56.0            | 4.464  | 1.419              | 72.2%     | 12.19 GB/s  |
+
+Readings (200 MHz, N_P=8, m'=4096, t=3):
+
+* **One lane is already at the single-outstanding-read capacity of its
+  channel.** The 1-in-flight row (1.004 cand/s) is within 4% of the real
+  lane's measured 1.044 — the master has no compute at all, so treat this as
+  "≈ one lane", not as a bound. This is why the second-ARID experiment above
+  was correctly rejected for a *single* lane: the +40% at 2 in flight is real
+  bandwidth, but one lane cannot produce a second independent request early
+  enough to claim it. **Two contexts sharing a channel each present their own
+  single outstanding read and land on the 2-deep row.**
+* **The channel is byte-bound, not latency-bound, at the top.** 12.11 GB/s of
+  12.8 (512-bit @ 200 MHz) at 2 in flight; the ceiling barely moves with clock
+  (4.437 → 4.464 Mblk/s at 250 MHz) because DRAM latency is fixed in ns.
+* Do **not** size this from `port busy`. 51% busy at 1.044 cand/s invites
+  "~2.0 cand/s per channel"; the measured answer is 1.41. Read/write
+  turnaround and write commit serialize more than the counter shows.
+
+The useful invariant: **one DDR4-2400 channel serves ~4.4 M
+block-compressions/s**, and a candidate is `t × m/1 KiB` compressions, so
+
+```text
+box cand/s ≈ 4 × 4.44e6 / (t × m/1024)      (f1.2xlarge, 4 channels, at ceiling)
+```
+
+| m      | t | box cand/s at ceiling | box cand/s today (1 lane/ch) |
+|--------|---|-----------------------|------------------------------|
+| 1 GiB  | 3 | 5.7                   | 4.18                         |
+| 64 MiB | 3 | 90                    | 67                           |
+| 19 MiB | 2 | 457                   | 337                          |
+
+(19 MiB / t=2 / p=1 is OWASP's baseline Argon2id configuration.) Per-lane rate
+is essentially m-independent — m'=16 MiB measures 1.013/1.007/1.049 vs
+1.000/1.007/1.044 at m'=4 MiB — because traffic per candidate scales with m
+exactly as the rate falls.
+
+### Traffic per candidate: 8.6 GB, not 12
+
+Measured 2739 B per compression (argon2id, t=3: one 1 KiB ref read + one
+1 KiB write per compression, plus a 1 KiB dest read on two of three passes)
+= **8.6 GB per 1 GiB / t=3 candidate**. `docs/HBM4_ARCHITECTURE.md` plans on
+12 GB/candidate, so its scale-out table is ~1.4× conservative (one HBM4 stack
+at 2 TB/s: ~232 cand/s, not 167; 70%-usable column ~162, not 117).
+
+### Ranked levers (measured)
+
+1. **Close 250 MHz — +19%, no RTL change.** 1.044 → 1.239 cand/s/lane
+   (argon2id), box 4.18 → 4.96. The blocking divider is already gone; what
+   remains is DSP register packing (`docs/TIMING_250MHZ.md`). Stays inside
+   the memory wall (lane 3.899 Mblk/s vs channel 4.464).
+2. **1.35 lanes per channel — +35% at 200 MHz.** 4.18 → ~5.65 cand/s per box.
+   Only +14% on top of 250 MHz (1.239 → 1.419), so 1 and 2 are partly
+   substitutes; the combination is ~5.7 cand/s per box, the hard ceiling for
+   this memory system.
+3. **Past ~4.44 Mblk/s per channel, only more/wider channels (HBM)** — with
+   the 8.6 GB/candidate constant above.
+4. **Compute-side overlap is the HBM lever, not the F1 one.** IDEAL 58.6
+   cyc/blk vs a ~36-cycle structural floor (16-beat prev/drain lockstep + two
+   dependent 9-cycle P waves) is ~1.6× of slack, but on DDR4 memory costs only
+   2.3 cycles (58.6 IDEAL vs 60.9 DDR4 for argon2id), so it buys ~0 here.
+
+### Blockers for multi-context-per-channel (lever 2)
+
+`argon2_multi_ctx` + `argon2_block_fabric` already schedule N lanes over one
+shared tagged port, but two properties of the fabric block a direct AXI
+attachment. Both are measured from the RTL, not assumed:
+
+* **`PARTITIONS=1` is unusable.** `PART_W = (PARTITIONS <= 1) ? 1 :
+  $clog2(PARTITIONS)`, so a single partition still computes
+  `map_local_addr = block >> 1` (not identity) and
+  `map_partition = (block + ctx)[0]`, which is 1 for half of all requests —
+  and no partition 1 exists to grant them. Serving one physical channel
+  therefore needs either a `PARTITIONS=1` fix or ≥2 fabric partitions
+  arbitrated onto one AXI port.
+* **The write grant is not burst-locked.** `wr_grant`/`wr_ready` are
+  recomputed per beat from `wr_valid`, and `wr_rr` advances only on an
+  accepted beat. If a requester's `wr_valid` drops mid-block, the grant moves
+  and beats from two different blocks interleave on one partition's write
+  port. AXI bursts must be contiguous, so an adapter behind a partition needs
+  either a burst-lock in the fabric or a per-partition write buffer keyed by
+  `(context, block_addr)`.
+
+Neither is large, but both touch the fabric's arbitration — land them as
+their own PR against the `multi` KAT, not bundled with a perf change.
+
 ## Model caveats
 
 * The DDR4 model is single-command-per-cycle with realistic latencies

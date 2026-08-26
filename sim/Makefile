@@ -107,6 +107,20 @@ SRC_tb_perf := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_fill_axi.sv \
 	tb_ddr4_ram.sv
 
+# Channel-capacity ceiling bench: the DDR4 model plus its own AXI master.
+SRC_tb_ddr4_ceiling := tb_ddr4_ram.sv
+
+# Per-channel capacity ceiling: a saturating AXI master on tb_ddr4_ram issuing
+# the argon2 traffic mix (NRD reads per NWR writes; 5:3 is t=3). Answers "how
+# many lanes can share one DDR4 channel" — an upper bound, not an achieved rate.
+CEIL_BLKS  ?= 4096
+CEIL_NRD   ?= 5
+CEIL_NWR   ?= 3
+CEIL_OUT   ?= 4
+CEIL_NCOMP ?= 24576
+CEIL_MHZ   ?= 200
+CEIL_LANE  ?= 1.044   # tb_perf argon2id N_P=8 cand/s at CEIL_MHZ (report only)
+
 # Partitioned-memory p=4 perf bench: one candidate over 4 independent
 # DDR4-2400 channels through argon2_mem_xbar (see tb_p4_perf header).
 P4_BLKS ?= 16384
@@ -130,6 +144,8 @@ SRC_tb_p4_perf := $(FILL_RTL) \
 p4perf: run-tb_p4_perf
 
 perf: run-tb_perf
+
+ddrceil: run-tb_ddr4_ceiling
 
 # 250 MHz timing-closure target (F1 sh_ddr geometry): same RTL cycle counts,
 # but the DDR4-2400 model is re-tuned for the 4 ns period so the projected
@@ -160,11 +176,26 @@ run-tb_perf: tb_perf.sv tb_ddr4_ram.sv
 	@ln -sf Vtb_perf__pch.h $(OBJ)/tb_perf/Vtb_perf__pch.h.slow
 	@$(MAKE) -s -C $(OBJ)/tb_perf -f Vtb_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
 	./$(OBJ)/tb_perf/tb_perf
+
+run-tb_ddr4_ceiling: tb_ddr4_ceiling.sv tb_ddr4_ram.sv
+	@rm -rf $(OBJ)/tb_ddr4_ceiling
+	@mkdir -p $(OBJ)/tb_ddr4_ceiling
+	$(VERILATOR) $(VFLAGS) -GNBLK=$(CEIL_BLKS) -GNRD=$(CEIL_NRD) -GNWR=$(CEIL_NWR) -GOUTSTANDING=$(CEIL_OUT) -GNCOMP=$(CEIL_NCOMP) -GPERF_MHZ=$(CEIL_MHZ) -GLANE_CAND=$(CEIL_LANE) --Mdir $(OBJ)/tb_ddr4_ceiling --main --exe --cc -o tb_ddr4_ceiling tb_ddr4_ceiling.sv $(SRC_tb_ddr4_ceiling) --top-module tb_ddr4_ceiling
+	@ln -sf Vtb_ddr4_ceiling__pch.h $(OBJ)/tb_ddr4_ceiling/Vtb_ddr4_ceiling__pch.h.fast
+	@ln -sf Vtb_ddr4_ceiling__pch.h $(OBJ)/tb_ddr4_ceiling/Vtb_ddr4_ceiling__pch.h.slow
+	@$(MAKE) -s -C $(OBJ)/tb_ddr4_ceiling -f Vtb_ddr4_ceiling.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
+	./$(OBJ)/tb_ddr4_ceiling/tb_ddr4_ceiling
 else
 tb_perf.out: tb_perf.sv tb_ddr4_ram.sv
 	$(IVERILOG) -g2012 -PNBLK=$(PERF_BLKS) -PN_P=$(PERF_NP) -PIDEAL_WR=$(PERF_IWR) -PTYPE_I=$(PERF_TYPE) -PPERF_MHZ=$(PERF_MHZ) -I$(INCDIR) -o $@ $< $(SRC_tb_perf)
 
 run-tb_perf: tb_perf.out
+	$(VVP) $<
+
+tb_ddr4_ceiling.out: tb_ddr4_ceiling.sv tb_ddr4_ram.sv
+	$(IVERILOG) -g2012 -PNBLK=$(CEIL_BLKS) -PNRD=$(CEIL_NRD) -PNWR=$(CEIL_NWR) -POUTSTANDING=$(CEIL_OUT) -PNCOMP=$(CEIL_NCOMP) -PPERF_MHZ=$(CEIL_MHZ) -PLANE_CAND=$(CEIL_LANE) -I$(INCDIR) -o $@ $< $(SRC_tb_ddr4_ceiling)
+
+run-tb_ddr4_ceiling: tb_ddr4_ceiling.out
 	$(VVP) $<
 endif
 
@@ -180,7 +211,7 @@ p4perf250: tb_p4_perf.out
 	$(VVP) $<
 endif
 
-.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 fabric hbmperf hbmperf-sweep multi axi axibig sweep cl perf p4perf perf250 perf-all vectors clean
+.PHONY: all blake2b blamka index compress addr fill discipline rfc p4 fabric hbmperf hbmperf-sweep multi axi axibig sweep cl perf p4perf perf250 perf-all ddrceil vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
 all: blake2b blamka index compress addr fill discipline rfc p4 fabric multi axi axibig sweep
