@@ -309,6 +309,14 @@ module tb_argon2_conc #(
     string        fp_sum [0:7];   // divergence fingerprints, reprinted at end
     integer       fp_n;
     initial fp_n = 0;
+    integer       wr_log [0:255];
+    integer       wr_n;
+    initial wr_n = 0;
+
+    always @(posedge clk) begin
+        if (rst_n && c_wr_valid && c_wr_ready && c_wr_last)
+            wr_log[wr_n++ % 256] = c_wr_addr;
+    end
 
     function automatic string blk_class(input int blk);
         int nx, ni;
@@ -320,7 +328,14 @@ module tb_argon2_conc #(
             end
             if (nx != 0)          blk_class = "X-POLLUTED";
             else if (ni == NBEAT) blk_class = "UNWRITTEN";
-            else                  blk_class = "WRONG-DATA";
+            else begin
+                int ng;
+                ng = 0;
+                for (int q = 0; q < NBEAT; q++)
+                    if (u_mem.mem[blk*NBEAT + q] === exp_img[blk*NBEAT + q]) ng++;
+                if (ng == NBEAT) blk_class = "GOOD";
+                else             blk_class = "WRONG-DATA";
+            end
         end
     endfunction
 
@@ -330,6 +345,7 @@ module tb_argon2_conc #(
     );
         begin
             $display("conc %s ...", name);
+            wr_n = 0;
             rst_n = 1'b0; start = 1'b0;
             passes = PASSES; lane_length = CTXBLKS; memory_blocks = CTXBLKS;
             type_i = typ;
@@ -365,6 +381,32 @@ module tb_argon2_conc #(
                          name, cycles, seen_done);
                 errors = errors + 1;
             end else begin
+                begin : fp_always
+                    int nw, nu, nx;
+                    string cl;
+                    nw = 0; nu = 0; nx = 0;
+                    for (int c2 = 0; c2 < NCTX; c2++)
+                        if (start_mask[c2])
+                            for (int k2 = 0; k2 < CTXBLKS; k2++) begin
+                                cl = blk_class(c2*CTXBLKS+k2);
+                                if (cl == "WRONG-DATA") nw++;
+                                else if (cl == "UNWRITTEN") nu++;
+                                else if (cl == "X-POLLUTED") nx++;
+                            end
+                    $display("  [fp] %s classes: wrong=%0d unwritten=%0d xpoll=%0d good=%0d wr_n=%0d",
+                             name, nw, nu, nx,
+                             (start_mask & {NCTX{1'b1}} ? 4'd0 : 4'd0)
+                             + (CTXBLKS*$countones(start_mask) - nw - nu - nx),
+                             wr_n);
+                    $display("  [fp] %s writes[0..11]: %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+                             name, wr_log[0], wr_log[1], wr_log[2], wr_log[3],
+                             wr_log[4], wr_log[5], wr_log[6], wr_log[7],
+                             wr_log[8], wr_log[9], wr_log[10], wr_log[11]);
+                    $display("  [fp] %s writes[..last]: %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+                             name, wr_log[12], wr_log[13], wr_log[14], wr_log[15],
+                             wr_log[16], wr_log[17], wr_log[18], wr_log[19],
+                             wr_log[20], wr_log[21], wr_log[22], wr_log[23]);
+                end
                 mism = 0;
                 for (int b = 0; b < TOTALBLK * NBEAT; b++) begin
                     // sharing-level probes: only started contexts are checked
