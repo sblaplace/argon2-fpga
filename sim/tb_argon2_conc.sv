@@ -309,13 +309,30 @@ module tb_argon2_conc #(
     string        fp_sum [0:7];   // divergence fingerprints, reprinted at end
     integer       fp_n;
     initial fp_n = 0;
+    string        fp2_sum [0:7];
+    integer       fp2_n;
+    initial fp2_n = 0;
     integer       wr_log [0:255];
     integer       wr_n;
+    integer       wr_beats;    // beats accepted by the model (channel side)
+    integer       lwr_beats;   // lane-side write-beat handshakes (all lanes)
+    integer       lwr_last;    // lane-side last-beat handshakes
+    integer       mux_gap;     // cycles a lane offers a beat but mux sends none
     initial wr_n = 0;
 
     always @(posedge clk) begin
-        if (rst_n && c_wr_valid && c_wr_ready && c_wr_last)
-            wr_log[wr_n++ % 256] = c_wr_addr;
+        if (rst_n && c_wr_valid && c_wr_ready) begin
+            wr_beats = wr_beats + 1;
+            if (c_wr_last) wr_log[wr_n++ % 256] = c_wr_addr;
+        end
+        if (rst_n) begin
+            for (int i = 0; i < NCTX; i++)
+                if (l_wr_valid[i] && l_wr_ready[i]) begin
+                    lwr_beats = lwr_beats + 1;
+                    if (l_wr_last[i]) lwr_last = lwr_last + 1;
+                end
+            if ((|l_wr_valid) && !c_wr_valid) mux_gap = mux_gap + 1;
+        end
     end
 
     function automatic string blk_class(input int blk);
@@ -345,7 +362,7 @@ module tb_argon2_conc #(
     );
         begin
             $display("conc %s ...", name);
-            wr_n = 0;
+            wr_n = 0; wr_beats = 0; lwr_beats = 0; lwr_last = 0; mux_gap = 0;
             rst_n = 1'b0; start = 1'b0;
             passes = PASSES; lane_length = CTXBLKS; memory_blocks = CTXBLKS;
             type_i = typ;
@@ -406,6 +423,13 @@ module tb_argon2_conc #(
                              name, wr_log[12], wr_log[13], wr_log[14], wr_log[15],
                              wr_log[16], wr_log[17], wr_log[18], wr_log[19],
                              wr_log[20], wr_log[21], wr_log[22], wr_log[23]);
+                    $sformat(fp2_sum[fp2_n],
+                             "%s: model_beats=%0d model_last=%0d lane_beats=%0d lane_last=%0d muxgap=%0d wrlog0..3=%0d,%0d,%0d,%0d",
+                             name, wr_beats, wr_n, lwr_beats, lwr_last, mux_gap,
+                             wr_log[0], wr_log[1], wr_log[2], wr_log[3]);
+                    fp2_n = fp2_n + 1;
+                    $display("  [fp2] %s: model(beats=%0d last=%0d) lane(beats=%0d last=%0d) muxgap=%0d",
+                             name, wr_beats, wr_n, lwr_beats, lwr_last, mux_gap);
                 end
                 mism = 0;
                 for (int b = 0; b < TOTALBLK * NBEAT; b++) begin
@@ -472,6 +496,8 @@ module tb_argon2_conc #(
         $display("FP-SUMMARY: %0d fingerprints", fp_n);
         for (int q = 0; q < fp_n; q++)
             $display("FP-SUMMARY: %0s", fp_sum[q]);
+        for (int q = 0; q < fp2_n; q++)
+            $display("FP2 %0s", fp2_sum[q]);
         if (proto_err != 0 || u_mem.errors != 0 || u_mem.ord_errs != 0) begin
             $display("FAIL conc protocol errors: %0d beat-order, %0d write-burst, %0d port-order",
                      proto_err, u_mem.errors, u_mem.ord_errs);
