@@ -216,6 +216,7 @@ module tb_argon2_conc #(
     logic [511:0]      c_wr_data;
 
     logic [NCTX-1:0] lane_busy, lane_done;
+    logic [NCTX-1:0] start_mask;   // CI-debug: which contexts launch
 
     genvar g;
     generate
@@ -223,7 +224,7 @@ module tb_argon2_conc #(
             argon2_fill_ctrl #(.ADDR_W(ADDR_W), .N_P(N_P)) u_fill (
                 .clk           (clk),
                 .rst_n         (rst_n),
-                .start         (start),
+                .start         (start & start_mask[g]),
                 .busy          (lane_busy[g]),
                 .done          (lane_done[g]),
                 .passes        (passes),
@@ -299,6 +300,29 @@ module tb_argon2_conc #(
     integer errors, cycles, mism;
     logic [NCTX-1:0] seen_done;
     logic [511:0] exp_img [0:TOTALBLK*NBEAT-1];
+    // Compact per-block divergence fingerprint (debugging 4-state vs
+    // 2-state simulator differences; see docs/PERFORMANCE.md conc section):
+    //   UNWRITTEN  got == seeded init image for all 16 beats
+    //   X-POLLUTED any beat has an X bit (4-state propagation)
+    //   WRONG-DATA fully written, none X, differs from golden
+    logic [511:0] init_snap [0:TOTALBLK*NBEAT-1];
+    string        fp_sum [0:7];   // divergence fingerprints, reprinted at end
+    integer       fp_n;
+    initial fp_n = 0;
+
+    function automatic string blk_class(input int blk);
+        int nx, ni;
+        begin
+            nx = 0; ni = 0;
+            for (int q = 0; q < NBEAT; q++) begin
+                if ((^u_mem.mem[blk*NBEAT + q]) === 1'bx) nx++;
+                if (u_mem.mem[blk*NBEAT + q] === init_snap[blk*NBEAT + q]) ni++;
+            end
+            if (nx != 0)          blk_class = "X-POLLUTED";
+            else if (ni == NBEAT) blk_class = "UNWRITTEN";
+            else                  blk_class = "WRONG-DATA";
+        end
+    endfunction
 
     task automatic run_type(
         input [1:0] typ, input string init_f, input string exp_f,
@@ -320,6 +344,8 @@ module tb_argon2_conc #(
                 u_mem.mem[b] = '0;
             $readmemh(init_f, u_mem.mem);
             for (int b = 0; b < TOTALBLK * NBEAT; b++)
+                init_snap[b] = u_mem.mem[b];
+            for (int b = 0; b < TOTALBLK * NBEAT; b++)
                 exp_img[b] = '0;
             $readmemh(exp_f, exp_img);
 
@@ -328,32 +354,54 @@ module tb_argon2_conc #(
             start = 1'b0;
 
             cycles = 0;
-            while ((seen_done != {NCTX{1'b1}}) && cycles < 1_000_000) begin
+            while (((seen_done & start_mask) != start_mask) && cycles < 1_000_000) begin
                 @(posedge clk);
                 seen_done <= seen_done | lane_done;
                 cycles = cycles + 1;
             end
 
-            if (seen_done != {NCTX{1'b1}}) begin
+            if ((seen_done & start_mask) != start_mask) begin
                 $display("FAIL %s timeout (%0d cycles, done=%b)",
                          name, cycles, seen_done);
                 errors = errors + 1;
             end else begin
                 mism = 0;
                 for (int b = 0; b < TOTALBLK * NBEAT; b++) begin
-                    if (u_mem.mem[b] !== exp_img[b]) begin
-                        if (mism < 8)
-                            $display("  beat %0d: got %016h.. want %016h..",
-                                     b, u_mem.mem[b][63:0], exp_img[b][63:0]);
+                    // sharing-level probes: only started contexts are checked
+                    if (start_mask[b / (CTXBLKS*NBEAT)] &&
+                        (u_mem.mem[b] !== exp_img[b]))
                         mism = mism + 1;
-                    end
                 end
                 if (mism != 0) begin
+                    int fd_ctx, fd_blk;
+                    fd_ctx = -1; fd_blk = -1;
+                    // find the true first differing block (any beat)
+                    for (int c = 0; c < NCTX && fd_ctx < 0; c++)
+                        for (int k = 0; k < CTXBLKS && start_mask[c]; k++) begin
+                            int nd;
+                            nd = 0;
+                            for (int q = 0; q < NBEAT; q++)
+                                if (u_mem.mem[(c*CTXBLKS+k)*NBEAT+q] !== exp_img[(c*CTXBLKS+k)*NBEAT+q])
+                                    nd++;
+                            if (nd != 0) begin
+                                fd_ctx = c; fd_blk = k;
+                                fp_sum[fp_n] = "";
+                                fp_sum[fp_n] = {name, " mask=", " ",
+                                               blk_class(c*CTXBLKS+k)};
+                                fp_n = fp_n + 1;
+                                $display("  [fp] %s mask=%b first_div=(ctx %0d blk %0d) %s got0=%016h want0=%016h",
+                                         name, start_mask, c, k,
+                                         blk_class(c*CTXBLKS+k),
+                                         u_mem.mem[(c*CTXBLKS+k)*NBEAT][63:0],
+                                         exp_img[(c*CTXBLKS+k)*NBEAT][63:0]);
+                                k = CTXBLKS;
+                            end
+                        end
                     $display("FAIL %s %0d beat(s) differ", name, mism);
                     errors = errors + 1;
                 end else begin
-                    $display("  %s: %0d contexts x %0d blocks OK (%0d cycles)",
-                             name, NCTX, CTXBLKS, cycles);
+                    $display("  %s: %0d contexts x %0d blocks OK (mask=%b, %0d cycles)",
+                             name, NCTX, CTXBLKS, start_mask, cycles);
                 end
             end
         end
@@ -363,11 +411,25 @@ module tb_argon2_conc #(
         clk = 1'b0;
         errors = 0;
         rst_n = 1'b0;
+        start_mask = {NCTX{1'b1}};
 
         run_type(2'd1, "gen/conc_i_init.hex",  "gen/conc_i_exp.hex",  "argon2i");
         run_type(2'd0, "gen/conc_d_init.hex",  "gen/conc_d_exp.hex",  "argon2d");
         run_type(2'd2, "gen/conc_id_init.hex", "gen/conc_id_exp.hex", "argon2id");
 
+        // Sharing-level probes for the d path (CI-debug fingerprints).
+        start_mask = '0;
+        start_mask[0] = 1'b1;    // single context through the conc
+        run_type(2'd0, "gen/conc_d_init.hex",  "gen/conc_d_exp.hex",  "argon2d@1ctx");
+        start_mask = '0;
+        start_mask[0] = 1'b1;    // two contexts
+        start_mask[1] = 1'b1;
+        run_type(2'd0, "gen/conc_d_init.hex",  "gen/conc_d_exp.hex",  "argon2d@2ctx");
+        start_mask = {NCTX{1'b1}};
+
+        $display("FP-SUMMARY: %0d fingerprints", fp_n);
+        for (int q = 0; q < fp_n; q++)
+            $display("FP-SUMMARY: %0s", fp_sum[q]);
         if (proto_err != 0 || u_mem.errors != 0 || u_mem.ord_errs != 0) begin
             $display("FAIL conc protocol errors: %0d beat-order, %0d write-burst, %0d port-order",
                      proto_err, u_mem.errors, u_mem.ord_errs);
