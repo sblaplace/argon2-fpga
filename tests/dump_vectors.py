@@ -91,18 +91,21 @@ def dump_sweep(m: int, t: int, type_: Type, stem: str) -> None:
     print(f"{stem} tag {tag.hex()}")
 
 
-def dump_multi(type_: Type, nctx: int, stem: str) -> None:
-    """Concatenated init/exp for tb_argon2_multi_ctx: nctx independent p=1
-    contexts, each with a distinct password/salt, appended in context order
-    (block-major within each context). A block misrouted by the shared fabric
-    (cross-context contamination) therefore shows up as a mismatch rather
-    than passing because all contexts hold identical data."""
+def dump_multi(
+    type_: Type, nctx: int, stem: str, m: int = 8, t: int = 2
+) -> None:
+    """Concatenated init/exp for tb_argon2_multi_ctx (and tb_argon2_conc):
+    nctx independent p=1 contexts, each with a distinct password/salt,
+    appended in context order (block-major within each context). A block
+    misrouted by the shared fabric / concentrator (cross-context
+    contamination) therefore shows up as a mismatch rather than passing
+    because all contexts hold identical data."""
     inits: list[list[int]] = []
     finals: list[list[int]] = []
     for c in range(nctx):
         kw = dict(
-            time_cost=2,
-            memory_cost=8,
+            time_cost=t,
+            memory_cost=m,
             parallelism=1,
             hash_len=32,
             type_=type_,
@@ -166,6 +169,7 @@ def main() -> None:
     dump_fill(Type.ID, "fill_id")
     for tn, tt in (("i", Type.I), ("d", Type.D), ("id", Type.ID)):  # tb_argon2_multi_ctx
         dump_multi(tt, 32, f"multi_{tn}")
+        dump_multi(tt, 4, f"conc_{tn}", m=16, t=3)   # tb_argon2_conc
     dump_sweep(128, 3, Type.I, "bigfill_i")   # tb_argon2_axi_big
     dump_sweep(128, 3, Type.D, "bigfill_d")
     dump_sweep(128, 3, Type.ID, "bigfill_id")
