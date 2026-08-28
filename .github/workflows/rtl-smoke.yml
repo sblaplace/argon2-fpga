@@ -51,3 +51,20 @@ jobs:
         run: |
           echo "Look under /tmp/rlt_smoke_* for compile.log / sim.log"
           find /tmp -maxdepth 1 -name 'rl*smoke*' -type d 2>/dev/null
+
+      # TEMPORARY (CI-debug for tb_argon2_conc on Icarus): publish the full
+      # bench output as a PR comment - the annotation window is too small.
+      - name: Publish conc bench output
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          make -C sim conc NP=1 > /tmp/conc.log 2>&1 || true
+          grep -vE "sorry:|warning: System task" /tmp/conc.log > /tmp/conc_f.log || true
+          {
+            echo "### conc CI-debug (HEAD=${GITHUB_SHA:0:12})"
+            echo '```'
+            cat /tmp/conc_f.log
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment 25 --body-file /tmp/comment.md || true
