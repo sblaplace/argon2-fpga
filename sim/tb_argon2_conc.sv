@@ -321,6 +321,19 @@ module tb_argon2_conc #(
     integer fp2_w3 [0:7];
     integer fp2_n;
     initial fp2_n = 0;
+    // per-run FSM histogram: flat hot-path counter, copied out at run end
+    integer fp3_cnt [0:15];
+    integer fp3_h [0:15][0:7];
+    integer fp3_run;
+    initial begin
+        fp3_run = -1;
+        for (int a = 0; a < 16; a++) fp3_cnt[a] = 0;
+    end
+
+    always @(posedge clk) begin
+        if (rst_n && fp3_run >= 0)
+            fp3_cnt[ctx[0].u_fill.state_o] = fp3_cnt[ctx[0].u_fill.state_o] + 1;
+    end
     integer       wr_log [0:255];
     integer       wr_n;
     integer       wr_beats;    // beats accepted by the model (channel side)
@@ -372,6 +385,8 @@ module tb_argon2_conc #(
         begin
             $display("conc %s ...", name);
             wr_n = 0; wr_beats = 0; lwr_beats = 0; lwr_last = 0; mux_gap = 0;
+            fp3_run = fp3_run + 1;
+            for (int a = 0; a < 16; a++) fp3_cnt[a] = 0;
             rst_n = 1'b0; start = 1'b0;
             passes = PASSES; lane_length = CTXBLKS; memory_blocks = CTXBLKS;
             type_i = typ;
@@ -434,6 +449,7 @@ module tb_argon2_conc #(
                              wr_log[20], wr_log[21], wr_log[22], wr_log[23]);
                     $display("  [fp2] %s: model(beats=%0d last=%0d) lane(beats=%0d last=%0d) muxgap=%0d",
                              name, wr_beats, wr_n, lwr_beats, lwr_last, mux_gap);
+                    for (int a = 0; a < 16; a++) fp3_h[a][fp2_n] = fp3_cnt[a];
                     fp2_mb[fp2_n] = wr_beats;  fp2_ml[fp2_n] = wr_n;
                     fp2_lb[fp2_n] = lwr_beats; fp2_ll[fp2_n] = lwr_last;
                     fp2_g [fp2_n] = mux_gap;
@@ -511,6 +527,12 @@ module tb_argon2_conc #(
             $display("FP2 row%0d mb=%0d ml=%0d lb=%0d ll=%0d gap=%0d w=%0d,%0d,%0d,%0d",
                      q, fp2_mb[q], fp2_ml[q], fp2_lb[q], fp2_ll[q], fp2_g[q],
                      fp2_w0[q], fp2_w1[q], fp2_w2[q], fp2_w3[q]);
+        for (int q = 0; q <= fp3_run; q++)
+            $display("FP3 row%0d WRITE=%0d CMP=%0d DISP=%0d ADV=%0d ISREF=%0d COLREF=%0d DSET=%0d OTHER=%0d",
+                     q, fp3_h[11][q], fp3_h[10][q], fp3_h[3][q], fp3_h[12][q],
+                     fp3_h[4][q], fp3_h[5][q], fp3_h[14][q],
+                     fp3_h[0][q]+fp3_h[1][q]+fp3_h[2][q]+fp3_h[6][q]+fp3_h[7][q]
+                     +fp3_h[8][q]+fp3_h[9][q]+fp3_h[13][q]+fp3_h[15][q]);
         if (proto_err != 0 || u_mem.errors != 0 || u_mem.ord_errs != 0) begin
             $display("FAIL conc protocol errors: %0d beat-order, %0d write-burst, %0d port-order",
                      proto_err, u_mem.errors, u_mem.ord_errs);
