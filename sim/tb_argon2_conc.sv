@@ -309,8 +309,17 @@ module tb_argon2_conc #(
     string        fp_sum [0:7];   // divergence fingerprints, reprinted at end
     integer       fp_n;
     initial fp_n = 0;
-    string        fp2_sum [0:7];
-    integer       fp2_n;
+    // write-path drop-point snapshot per run (integers only - 4-state safe)
+    integer fp2_mb [0:7];   // model-accepted beats
+    integer fp2_ml [0:7];   // model-accepted bursts (last beats)
+    integer fp2_lb [0:7];   // lane-side beat handshakes
+    integer fp2_ll [0:7];   // lane-side last-beat handshakes
+    integer fp2_g  [0:7];   // cycles a lane offered a beat, mux sent none
+    integer fp2_w0 [0:7];   // first four model write addresses
+    integer fp2_w1 [0:7];
+    integer fp2_w2 [0:7];
+    integer fp2_w3 [0:7];
+    integer fp2_n;
     initial fp2_n = 0;
     integer       wr_log [0:255];
     integer       wr_n;
@@ -423,13 +432,14 @@ module tb_argon2_conc #(
                              name, wr_log[12], wr_log[13], wr_log[14], wr_log[15],
                              wr_log[16], wr_log[17], wr_log[18], wr_log[19],
                              wr_log[20], wr_log[21], wr_log[22], wr_log[23]);
-                    $sformat(fp2_sum[fp2_n],
-                             "%s: model_beats=%0d model_last=%0d lane_beats=%0d lane_last=%0d muxgap=%0d wrlog0..3=%0d,%0d,%0d,%0d",
-                             name, wr_beats, wr_n, lwr_beats, lwr_last, mux_gap,
-                             wr_log[0], wr_log[1], wr_log[2], wr_log[3]);
-                    fp2_n = fp2_n + 1;
                     $display("  [fp2] %s: model(beats=%0d last=%0d) lane(beats=%0d last=%0d) muxgap=%0d",
                              name, wr_beats, wr_n, lwr_beats, lwr_last, mux_gap);
+                    fp2_mb[fp2_n] = wr_beats;  fp2_ml[fp2_n] = wr_n;
+                    fp2_lb[fp2_n] = lwr_beats; fp2_ll[fp2_n] = lwr_last;
+                    fp2_g [fp2_n] = mux_gap;
+                    fp2_w0[fp2_n] = wr_log[0]; fp2_w1[fp2_n] = wr_log[1];
+                    fp2_w2[fp2_n] = wr_log[2]; fp2_w3[fp2_n] = wr_log[3];
+                    fp2_n = fp2_n + 1;
                 end
                 mism = 0;
                 for (int b = 0; b < TOTALBLK * NBEAT; b++) begin
@@ -496,8 +506,11 @@ module tb_argon2_conc #(
         $display("FP-SUMMARY: %0d fingerprints", fp_n);
         for (int q = 0; q < fp_n; q++)
             $display("FP-SUMMARY: %0s", fp_sum[q]);
+        // rows: 0=i 1=d 2=id 3=d@1ctx 4=d@2ctx
         for (int q = 0; q < fp2_n; q++)
-            $display("FP2 %0s", fp2_sum[q]);
+            $display("FP2 row%0d mb=%0d ml=%0d lb=%0d ll=%0d gap=%0d w=%0d,%0d,%0d,%0d",
+                     q, fp2_mb[q], fp2_ml[q], fp2_lb[q], fp2_ll[q], fp2_g[q],
+                     fp2_w0[q], fp2_w1[q], fp2_w2[q], fp2_w3[q]);
         if (proto_err != 0 || u_mem.errors != 0 || u_mem.ord_errs != 0) begin
             $display("FAIL conc protocol errors: %0d beat-order, %0d write-burst, %0d port-order",
                      proto_err, u_mem.errors, u_mem.ord_errs);
