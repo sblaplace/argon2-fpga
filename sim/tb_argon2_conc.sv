@@ -216,7 +216,6 @@ module tb_argon2_conc #(
     logic [511:0]      c_wr_data;
 
     logic [NCTX-1:0] lane_busy, lane_done;
-    logic [NCTX-1:0] start_mask;   // CI-debug: which contexts launch
 
     genvar g;
     generate
@@ -224,7 +223,7 @@ module tb_argon2_conc #(
             argon2_fill_ctrl #(.ADDR_W(ADDR_W), .N_P(N_P)) u_fill (
                 .clk           (clk),
                 .rst_n         (rst_n),
-                .start         (start & start_mask[g]),
+                .start         (start),
                 .busy          (lane_busy[g]),
                 .done          (lane_done[g]),
                 .passes        (passes),
@@ -300,83 +299,6 @@ module tb_argon2_conc #(
     integer errors, cycles, mism;
     logic [NCTX-1:0] seen_done;
     logic [511:0] exp_img [0:TOTALBLK*NBEAT-1];
-    // Compact per-block divergence fingerprint (debugging 4-state vs
-    // 2-state simulator differences; see docs/PERFORMANCE.md conc section):
-    //   UNWRITTEN  got == seeded init image for all 16 beats
-    //   X-POLLUTED any beat has an X bit (4-state propagation)
-    //   WRONG-DATA fully written, none X, differs from golden
-    logic [511:0] init_snap [0:TOTALBLK*NBEAT-1];
-    string        fp_sum [0:7];   // divergence fingerprints, reprinted at end
-    integer       fp_n;
-    initial fp_n = 0;
-    // write-path drop-point snapshot per run (integers only - 4-state safe)
-    integer fp2_mb [0:7];   // model-accepted beats
-    integer fp2_ml [0:7];   // model-accepted bursts (last beats)
-    integer fp2_lb [0:7];   // lane-side beat handshakes
-    integer fp2_ll [0:7];   // lane-side last-beat handshakes
-    integer fp2_g  [0:7];   // cycles a lane offered a beat, mux sent none
-    integer fp2_w0 [0:7];   // first four model write addresses
-    integer fp2_w1 [0:7];
-    integer fp2_w2 [0:7];
-    integer fp2_w3 [0:7];
-    integer fp2_n;
-    initial fp2_n = 0;
-    // per-run FSM histogram: flat hot-path counter, copied out at run end
-    integer fp3_cnt [0:15];
-    integer fp3_h [0:15][0:7];
-    integer fp3_run;
-    initial begin
-        fp3_run = -1;
-        for (int a = 0; a < 16; a++) fp3_cnt[a] = 0;
-    end
-
-    always @(posedge clk) begin
-        if (rst_n && fp3_run >= 0)
-            fp3_cnt[ctx[0].u_fill.state_o] = fp3_cnt[ctx[0].u_fill.state_o] + 1;
-    end
-    integer       wr_log [0:255];
-    integer       wr_n;
-    integer       wr_beats;    // beats accepted by the model (channel side)
-    integer       lwr_beats;   // lane-side write-beat handshakes (all lanes)
-    integer       lwr_last;    // lane-side last-beat handshakes
-    integer       mux_gap;     // cycles a lane offers a beat but mux sends none
-    initial wr_n = 0;
-
-    always @(posedge clk) begin
-        if (rst_n && c_wr_valid && c_wr_ready) begin
-            wr_beats = wr_beats + 1;
-            if (c_wr_last) wr_log[wr_n++ % 256] = c_wr_addr;
-        end
-        if (rst_n) begin
-            for (int i = 0; i < NCTX; i++)
-                if (l_wr_valid[i] && l_wr_ready[i]) begin
-                    lwr_beats = lwr_beats + 1;
-                    if (l_wr_last[i]) lwr_last = lwr_last + 1;
-                end
-            if ((|l_wr_valid) && !c_wr_valid) mux_gap = mux_gap + 1;
-        end
-    end
-
-    function automatic string blk_class(input int blk);
-        int nx, ni;
-        begin
-            nx = 0; ni = 0;
-            for (int q = 0; q < NBEAT; q++) begin
-                if ((^u_mem.mem[blk*NBEAT + q]) === 1'bx) nx++;
-                if (u_mem.mem[blk*NBEAT + q] === init_snap[blk*NBEAT + q]) ni++;
-            end
-            if (nx != 0)          blk_class = "X-POLLUTED";
-            else if (ni == NBEAT) blk_class = "UNWRITTEN";
-            else begin
-                int ng;
-                ng = 0;
-                for (int q = 0; q < NBEAT; q++)
-                    if (u_mem.mem[blk*NBEAT + q] === exp_img[blk*NBEAT + q]) ng++;
-                if (ng == NBEAT) blk_class = "GOOD";
-                else             blk_class = "WRONG-DATA";
-            end
-        end
-    endfunction
 
     task automatic run_type(
         input [1:0] typ, input string init_f, input string exp_f,
@@ -384,9 +306,6 @@ module tb_argon2_conc #(
     );
         begin
             $display("conc %s ...", name);
-            wr_n = 0; wr_beats = 0; lwr_beats = 0; lwr_last = 0; mux_gap = 0;
-            fp3_run = fp3_run + 1;
-            for (int a = 0; a < 16; a++) fp3_cnt[a] = 0;
             rst_n = 1'b0; start = 1'b0;
             passes = PASSES; lane_length = CTXBLKS; memory_blocks = CTXBLKS;
             type_i = typ;
@@ -401,8 +320,6 @@ module tb_argon2_conc #(
                 u_mem.mem[b] = '0;
             $readmemh(init_f, u_mem.mem);
             for (int b = 0; b < TOTALBLK * NBEAT; b++)
-                init_snap[b] = u_mem.mem[b];
-            for (int b = 0; b < TOTALBLK * NBEAT; b++)
                 exp_img[b] = '0;
             $readmemh(exp_f, exp_img);
 
@@ -411,89 +328,41 @@ module tb_argon2_conc #(
             start = 1'b0;
 
             cycles = 0;
-            while (((seen_done & start_mask) != start_mask) && cycles < 1_000_000) begin
+            while ((seen_done != {NCTX{1'b1}}) && cycles < 1_000_000) begin
                 @(posedge clk);
-                seen_done <= seen_done | lane_done;
+                // BLOCKING accumulate: an NBA here would still be pending
+                // when the next run_type's `seen_done = '0` executes in the
+                // same time step (compare/print take none), and Icarus's
+                // active-vs-NBA region ordering commits it AFTER the zero —
+                // the next run then exits instantly with all-dones-seen and
+                // compares an untouched memory (a $readmemh-visible
+                // "everything differs" FAIL that Verilator's scheduler does
+                // not produce). tb_argon2_p4 avoids the class entirely by
+                // waiting on the job-level done; blocking here matches that.
+                seen_done = seen_done | lane_done;
                 cycles = cycles + 1;
             end
 
-            if ((seen_done & start_mask) != start_mask) begin
+            if (seen_done != {NCTX{1'b1}}) begin
                 $display("FAIL %s timeout (%0d cycles, done=%b)",
                          name, cycles, seen_done);
                 errors = errors + 1;
             end else begin
-                begin : fp_always
-                    int nw, nu, nx;
-                    string cl;
-                    nw = 0; nu = 0; nx = 0;
-                    for (int c2 = 0; c2 < NCTX; c2++)
-                        if (start_mask[c2])
-                            for (int k2 = 0; k2 < CTXBLKS; k2++) begin
-                                cl = blk_class(c2*CTXBLKS+k2);
-                                if (cl == "WRONG-DATA") nw++;
-                                else if (cl == "UNWRITTEN") nu++;
-                                else if (cl == "X-POLLUTED") nx++;
-                            end
-                    $display("  [fp] %s classes: wrong=%0d unwritten=%0d xpoll=%0d good=%0d wr_n=%0d",
-                             name, nw, nu, nx,
-                             (start_mask & {NCTX{1'b1}} ? 4'd0 : 4'd0)
-                             + (CTXBLKS*$countones(start_mask) - nw - nu - nx),
-                             wr_n);
-                    $display("  [fp] %s writes[0..11]: %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
-                             name, wr_log[0], wr_log[1], wr_log[2], wr_log[3],
-                             wr_log[4], wr_log[5], wr_log[6], wr_log[7],
-                             wr_log[8], wr_log[9], wr_log[10], wr_log[11]);
-                    $display("  [fp] %s writes[..last]: %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d",
-                             name, wr_log[12], wr_log[13], wr_log[14], wr_log[15],
-                             wr_log[16], wr_log[17], wr_log[18], wr_log[19],
-                             wr_log[20], wr_log[21], wr_log[22], wr_log[23]);
-                    $display("  [fp2] %s: model(beats=%0d last=%0d) lane(beats=%0d last=%0d) muxgap=%0d",
-                             name, wr_beats, wr_n, lwr_beats, lwr_last, mux_gap);
-                    for (int a = 0; a < 16; a++) fp3_h[a][fp2_n] = fp3_cnt[a];
-                    fp2_mb[fp2_n] = wr_beats;  fp2_ml[fp2_n] = wr_n;
-                    fp2_lb[fp2_n] = lwr_beats; fp2_ll[fp2_n] = lwr_last;
-                    fp2_g [fp2_n] = mux_gap;
-                    fp2_w0[fp2_n] = wr_log[0]; fp2_w1[fp2_n] = wr_log[1];
-                    fp2_w2[fp2_n] = wr_log[2]; fp2_w3[fp2_n] = wr_log[3];
-                    fp2_n = fp2_n + 1;
-                end
                 mism = 0;
                 for (int b = 0; b < TOTALBLK * NBEAT; b++) begin
-                    // sharing-level probes: only started contexts are checked
-                    if (start_mask[b / (CTXBLKS*NBEAT)] &&
-                        (u_mem.mem[b] !== exp_img[b]))
+                    if (u_mem.mem[b] !== exp_img[b]) begin
+                        if (mism < 8)
+                            $display("  beat %0d: got %016h.. want %016h..",
+                                     b, u_mem.mem[b][63:0], exp_img[b][63:0]);
                         mism = mism + 1;
+                    end
                 end
                 if (mism != 0) begin
-                    int fd_ctx, fd_blk;
-                    fd_ctx = -1; fd_blk = -1;
-                    // find the true first differing block (any beat)
-                    for (int c = 0; c < NCTX && fd_ctx < 0; c++)
-                        for (int k = 0; k < CTXBLKS && start_mask[c]; k++) begin
-                            int nd;
-                            nd = 0;
-                            for (int q = 0; q < NBEAT; q++)
-                                if (u_mem.mem[(c*CTXBLKS+k)*NBEAT+q] !== exp_img[(c*CTXBLKS+k)*NBEAT+q])
-                                    nd++;
-                            if (nd != 0) begin
-                                fd_ctx = c; fd_blk = k;
-                                fp_sum[fp_n] = "";
-                                fp_sum[fp_n] = {name, " mask=", " ",
-                                               blk_class(c*CTXBLKS+k)};
-                                fp_n = fp_n + 1;
-                                $display("  [fp] %s mask=%b first_div=(ctx %0d blk %0d) %s got0=%016h want0=%016h",
-                                         name, start_mask, c, k,
-                                         blk_class(c*CTXBLKS+k),
-                                         u_mem.mem[(c*CTXBLKS+k)*NBEAT][63:0],
-                                         exp_img[(c*CTXBLKS+k)*NBEAT][63:0]);
-                                k = CTXBLKS;
-                            end
-                        end
                     $display("FAIL %s %0d beat(s) differ", name, mism);
                     errors = errors + 1;
                 end else begin
-                    $display("  %s: %0d contexts x %0d blocks OK (mask=%b, %0d cycles)",
-                             name, NCTX, CTXBLKS, start_mask, cycles);
+                    $display("  %s: %0d contexts x %0d blocks OK (%0d cycles)",
+                             name, NCTX, CTXBLKS, cycles);
                 end
             end
         end
@@ -503,36 +372,11 @@ module tb_argon2_conc #(
         clk = 1'b0;
         errors = 0;
         rst_n = 1'b0;
-        start_mask = {NCTX{1'b1}};
 
         run_type(2'd1, "gen/conc_i_init.hex",  "gen/conc_i_exp.hex",  "argon2i");
         run_type(2'd0, "gen/conc_d_init.hex",  "gen/conc_d_exp.hex",  "argon2d");
         run_type(2'd2, "gen/conc_id_init.hex", "gen/conc_id_exp.hex", "argon2id");
 
-        // Sharing-level probes for the d path (CI-debug fingerprints).
-        start_mask = '0;
-        start_mask[0] = 1'b1;    // single context through the conc
-        run_type(2'd0, "gen/conc_d_init.hex",  "gen/conc_d_exp.hex",  "argon2d@1ctx");
-        start_mask = '0;
-        start_mask[0] = 1'b1;    // two contexts
-        start_mask[1] = 1'b1;
-        run_type(2'd0, "gen/conc_d_init.hex",  "gen/conc_d_exp.hex",  "argon2d@2ctx");
-        start_mask = {NCTX{1'b1}};
-
-        $display("FP-SUMMARY: %0d fingerprints", fp_n);
-        for (int q = 0; q < fp_n; q++)
-            $display("FP-SUMMARY: %0s", fp_sum[q]);
-        // rows: 0=i 1=d 2=id 3=d@1ctx 4=d@2ctx
-        for (int q = 0; q < fp2_n; q++)
-            $display("FP2 row%0d mb=%0d ml=%0d lb=%0d ll=%0d gap=%0d w=%0d,%0d,%0d,%0d",
-                     q, fp2_mb[q], fp2_ml[q], fp2_lb[q], fp2_ll[q], fp2_g[q],
-                     fp2_w0[q], fp2_w1[q], fp2_w2[q], fp2_w3[q]);
-        for (int q = 0; q <= fp3_run; q++)
-            $display("FP3 row%0d WRITE=%0d CMP=%0d DISP=%0d ADV=%0d ISREF=%0d COLREF=%0d DSET=%0d OTHER=%0d",
-                     q, fp3_h[11][q], fp3_h[10][q], fp3_h[3][q], fp3_h[12][q],
-                     fp3_h[4][q], fp3_h[5][q], fp3_h[14][q],
-                     fp3_h[0][q]+fp3_h[1][q]+fp3_h[2][q]+fp3_h[6][q]+fp3_h[7][q]
-                     +fp3_h[8][q]+fp3_h[9][q]+fp3_h[13][q]+fp3_h[15][q]);
         if (proto_err != 0 || u_mem.errors != 0 || u_mem.ord_errs != 0) begin
             $display("FAIL conc protocol errors: %0d beat-order, %0d write-burst, %0d port-order",
                      proto_err, u_mem.errors, u_mem.ord_errs);
