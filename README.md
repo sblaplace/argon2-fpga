@@ -156,6 +156,19 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       block fabric. `tb_argon2_multi_ctx` runs 32 contexts (distinct
       passwords) through a data-storing HBM model and compares each context's
       final working set against the Python reference (`make -C sim multi`).
+- [x] **Multi-context concentration — the measured +56% cand/s lever**
+      (`argon2_lane_conc`): N independent p=1 contexts share ONE memory
+      channel through per-lane request queues, a round-robin command slot
+      with an in-flight lane-tag FIFO, and a burst-locked write arbiter —
+      the fill controllers run unchanged (same lane-port contract as
+      `argon2_mem_xbar`). Measured on the cycle-accurate DDR4 model
+      (`make -C sim concperf`, N_P=8, argon2id): **1 ctx 1.044 → 3 ctx
+      1.632 cand/s per channel; f1.2xlarge box 4.18 → 6.53 (+56%)**; the
+      port is byte-bound at 3 contexts (250 MHz gains nothing more).
+      KAT: `tb_argon2_conc` (4 contexts, distinct passwords, i/d/id,
+      beat-order / burst-contiguity / return-order assertions). Landing it
+      fixed a real tag-FIFO admission off-by-one in `argon2_mem_xbar` too
+      (p4perf 3.598 → 3.685 cand/s). Details: `docs/PERFORMANCE.md`.
 - [x] **Per-channel capacity ceiling** (`sim/tb_ddr4_ceiling.sv`): a
       saturating AXI master on the same cycle-accurate DDR4-2400 model, at the
       argon2 traffic mix. Measured: one channel serves **~4.4 M
@@ -184,6 +197,8 @@ make test                              # RFC 7693 + RFC 9106 §5, no simulator n
 make -C sim                            # Icarus self-checks (needs iverilog)
 make sim-verilator                     # same benches on Verilator via the PyPI/system helper
 make -C sim SIM=verilator NP=8 sweep   # m'16-128 x t1-3 x i/d/id AXI KAT sweep
+make -C sim conc                      # N-context-per-channel KAT (iverilog too)
+make -C sim CONC_CTXS=3 SIM=verilator concperf   # contexts/channel cand/s sweep
 make sim-np8                           # full sim suite at the N_P=8 performance point
 make sim-verilator-np8                 # same full suite at N_P=8 on Verilator
 make perf-verilator                    # DDR4 perf bench on Verilator (default PERF_NP=1)

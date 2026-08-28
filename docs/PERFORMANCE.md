@@ -487,6 +487,89 @@ data-dependent ordering does not permit. A second outstanding read on the
 same AXI port is not that mechanism. Code was reverted; this note is kept
 so the experiment isn't repeated.
 
+## Multi-context concentration: N contexts per channel (measured)
+
+Lever 2 above is no longer an estimate. `argon2_lane_conc`
+(`rtl/argon2/argon2_lane_conc.sv`) concentrates N independent p=1 fill
+controllers onto ONE memory channel port:
+
+* **Reads**: per-lane 1-deep request queue, round-robin issue onto one
+  channel command slot, in-flight lane-tag FIFO (responses return in issue
+  order on one AXI ID, so the FIFO head routes every beat home). A lane's
+  request is only issued when the lane has no burst in flight — the
+  fill-controller lane-port contract (`argon2_mem_xbar` semantics) is
+  preserved exactly, so the unchanged, bit-identical `argon2_fill_ctrl`
+  runs unmodified behind it.
+* **Writes**: burst-locked round-robin — the grant holds from a lane's
+  first beat of a block until its `wr_last` beat, so backpressure can never
+  interleave two contexts' blocks on one AXI burst (the exact property the
+  block-fabric write path was missing; see the blockers note above).
+* Context i's blocks live at `i*ctx_len` in the shared channel memory
+  (disjoint regions; all RAW hazard logic stays inside each lane's
+  controller). No cross-context hazard logic exists or is needed.
+
+### Measured (`tb_conc_perf`, N_P=8, m'=4 MiB channel total, t=3, 200 MHz)
+
+| contexts/channel | cyc/blk (aggregate) | cand/s per channel | f1.2xlarge box (×4) | vs 1 lane/ch |
+|---:|---:|---:|---:|---:|
+| 1 (tb_perf baseline) | 60.9 | 1.044 | 4.18 | — |
+| 2 | 40.8 | 1.556 | 6.22 | +49% |
+| **3** | **39.0** | **1.632** | **6.53** | **+56%** |
+| 4 | 39.1 | 1.626 | 6.51 | +56% |
+
+By type at the 3-context point: argon2id 1.632, argon2d 1.609, argon2i
+1.469 — the three converge because the channel, not the lane's compute
+path, is now the binding constraint (that is the point). At 250 MHz the
+3-context point stays at ~1.62 cand/s (48.9 cyc/blk): with the port
+byte-bound, the faster clock no longer buys throughput — consistent with
+the ceiling table's flat 4-in-flight row. Concentrator wait is ~0 cyc/blk
+at 3-4 contexts (the queues absorb everything); it is 29 cyc/blk at 2.
+
+Two consequences for the ceiling discussion below: the saturating-master
+"one channel serves ~4.44 M compressions/s" invariant is now known
+**conservative** — the real argon2id mix through the concentrator measures
+~5.1 M compressions/s per channel (39 cyc/blk) at 3+ in flight, so the
+"box cand/s at ceiling" table under-states by ~15%. And since a lane is
+1.044 of that ~1.63, **the per-lane AXI ceiling argument is retired at the
+box level: extra contexts, not extra lane speed, are the cheapest cand/s.**
+
+Correctness coverage: `tb_argon2_conc` (`make -C sim conc`, in
+`scripts/run_tb.py` at N_P=1 and 8) — 4 contexts with distinct
+passwords/salts, m'=16/t=3, i/d/id, against per-context golden images from
+`ref/`, plus built-in protocol checks: per-lane beat order 0..15, write
+burst contiguity under mid-burst backpressure (1 stall in 4), and
+shared-port return-order. The bench memory is a 2-deep pipelined model
+(accepts a new read command while the previous burst streams) — the
+property no existing bench had, which is what makes the concentrator's tag
+FIFO actually exercisable.
+
+Bugs found on the way (both fixed, suite stayed green):
+
+* **In-flight tag admission off-by-one (RTL, real)**: both the new
+  concentrator and `argon2_mem_xbar` admitted a new channel command when
+  `tag_cnt + (cmd_accepted ? 0 : 1) < MAX_INFLIGHT` — which under-counts
+  by the command being accepted in the same cycle, so `tag_wr_ptr` can
+  wrap onto a live entry and two lanes' 16-beat responses silently swap
+  (full bursts, so per-lane beat counters stay happy). Correct accounting
+  is `tag_cnt + (cmd_accepted ? 1 : 0) - (resp_done ? 1 : 0) < MAX`. In
+  `tb_argon2_p4`/`tb_p4_perf` the pattern never filled the FIFO past the
+  threshold in practice, so it was invisible there; after the fix
+  `tb_p4_perf` argon2id measures 3.685 cand/s (was 3.598, +2.4%).
+* **Bench memory model 2-slot reorder (bench only)**: an arrival could
+  take an empty slot-0 ahead of a command still parked in slot-1 when a
+  handoff drained slot-0 in the same cycle — the shared port then returned
+  bursts out of acceptance order, which the tag FIFO upstream cannot
+  tolerate. The model now composes all slot updates through explicit
+  next-state variables, and the return-order assertion it gained makes any
+  future reorder a hard FAIL instead of silent data corruption.
+
+What this does NOT yet include: the F1 CL wiring (the CL still runs one
+p=1 job per channel — hosting 3 contexts per channel is a host-API +
+register-file change, plus one `argon2_lane_conc` per channel), and the
+init/final hashing (H/H') per context, which the lane controllers do not
+do today (the host supplies init blocks and reads back the final block,
+same as the current CL contract).
+
 ## Per-channel ceiling: how much room does one DDR4 channel have?
 
 Every number above is *one lane on one channel*. Before adding lanes, this
@@ -551,20 +634,25 @@ at 2 TB/s: ~232 cand/s, not 167; 70%-usable column ~162, not 117).
 
 ### Ranked levers (measured)
 
-1. **Close 250 MHz — +19%, no RTL change.** 1.044 → 1.239 cand/s/lane
-   (argon2id), box 4.18 → 4.96. The blocking divider is already gone; what
-   remains is DSP register packing (`docs/TIMING_250MHZ.md`). Stays inside
-   the memory wall (lane 3.899 Mblk/s vs channel 4.464).
-2. **1.35 lanes per channel — +35% at 200 MHz.** 4.18 → ~5.65 cand/s per box.
-   Only +14% on top of 250 MHz (1.239 → 1.419), so 1 and 2 are partly
-   substitutes; the combination is ~5.7 cand/s per box, the hard ceiling for
-   this memory system.
-3. **Past ~4.44 Mblk/s per channel, only more/wider channels (HBM)** — with
-   the 8.6 GB/candidate constant above.
+1. **3 contexts per channel — +56% at 200 MHz, MEASURED (landed in sim).**
+   4.18 → 6.53 cand/s per box via `argon2_lane_conc` — see "Multi-context
+   concentration" above. This subsumes most of lever 2 below and most of
+   the 250 MHz gain; at 3 ctx/ch the port is byte-bound, so clock no
+   longer moves box throughput.
+2. **Close 250 MHz — +19% at ONE lane/channel, no RTL change.** 1.044 →
+   1.239 cand/s/lane (argon2id), box 4.18 → 4.96. The blocking divider is
+   already gone; what remains is DSP register packing
+   (`docs/TIMING_250MHZ.md`). Largely a substitute for lever 1 now.
+3. **Past the measured ~5.1 Mblk/s per channel, only more/wider channels
+   (HBM)** — with the 8.6 GB/candidate constant above. (The 4.44 Mblk/s
+   figure from `tb_ddr4_ceiling` is conservative; the concentrator
+   measures ~5.1 Mblk/s at the same mix.)
 4. **Compute-side overlap is the HBM lever, not the F1 one.** IDEAL 58.6
    cyc/blk vs a ~36-cycle structural floor (16-beat prev/drain lockstep + two
    dependent 9-cycle P waves) is ~1.6× of slack, but on DDR4 memory costs only
-   2.3 cycles (58.6 IDEAL vs 60.9 DDR4 for argon2id), so it buys ~0 here.
+   2.3 cycles (58.6 IDEAL vs 60.9 DDR4 for argon2id), so it buys ~0 here —
+   and with 3 contexts per channel the lane's compute gaps are someone
+   else's turn on the port anyway.
 
 ### Blockers for multi-context-per-channel (lever 2)
 

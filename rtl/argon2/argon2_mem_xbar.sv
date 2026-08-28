@@ -234,9 +234,16 @@ module argon2_mem_xbar #(
                 // Update in-flight tag count
                 tag_cnt[c] <= tag_cnt[c] + (cmd_accepted ? 4'd1 : 4'd0) - (resp_done ? 4'd1 : 4'd0);
 
-                // Arbitrate new command when command slot is free and tag FIFO has room
+                // Arbitrate new command when command slot is free and tag FIFO
+                // has room for the command's FUTURE push: count this cycle's
+                // push (cmd_accepted) and pop (resp_done), not just the
+                // registered tag_cnt — otherwise tag_wr_ptr can wrap onto a
+                // live entry and two lanes' responses swap (silent 16-beat
+                // misroute). Same fix as argon2_lane_conc.
                 if (!cmd_valid[c] || cmd_accepted) begin
-                    if (|cand[c*LANES +: LANES] && (tag_cnt[c] + (cmd_accepted ? 4'd0 : 4'd1) < 4'(MAX_INFLIGHT))) begin
+                    if (|cand[c*LANES +: LANES] && (tag_cnt[c] + (cmd_accepted ? 4'd1 : 4'd0)
+                                                    - (resp_done ? 4'd1 : 4'd0)
+                                                    < 4'(MAX_INFLIGHT))) begin
                         for (int k = LANES-1; k >= 0; k--) begin
                             if (grant[c*LANES + k]) begin
                                 cmd_valid[c] <= 1'b1;

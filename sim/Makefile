@@ -71,6 +71,13 @@ SRC_tb_argon2_multi_ctx := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_multi_ctx.sv \
 	$(RTL)/argon2/argon2_block_fabric.sv
 
+# Multi-context concentrator KAT: NCTX independent p=1 contexts sharing ONE
+# memory port through argon2_lane_conc (tagged multi-in-flight reads +
+# burst-locked writes) — the lever-2 topology measured by tb_conc_perf.
+SRC_tb_argon2_conc := $(FILL_RTL) \
+	$(RTL)/argon2/argon2_lane_conc.sv
+
+
 # ---- F1 CL top-level bench ------------------------------------------------
 F1DES := ../fpga/f1/design
 
@@ -121,6 +128,20 @@ CEIL_NCOMP ?= 24576
 CEIL_MHZ   ?= 200
 CEIL_LANE  ?= 1.044   # tb_perf argon2id N_P=8 cand/s at CEIL_MHZ (report only)
 
+# Multi-context concentrator perf bench: NCTX p=1 contexts sharing ONE
+# DDR4-2400 channel through argon2_lane_conc (lever 2; see tb_conc_perf
+# header). CONC_CTXS sweeps the contexts-per-channel point.
+CONC_NP   ?= 8
+CONC_CTXS ?= 2
+CONC_BLKS ?= 4096
+CONC_TYPE ?= 2
+CONC_MHZ  ?= 200
+
+SRC_tb_conc_perf := $(FILL_RTL) \
+	$(RTL)/argon2/argon2_lane_conc.sv \
+	$(RTL)/argon2/argon2_axi_mm.sv \
+	tb_ddr4_ram.sv
+
 # Partitioned-memory p=4 perf bench: one candidate over 4 independent
 # DDR4-2400 channels through argon2_mem_xbar (see tb_p4_perf header).
 P4_BLKS ?= 16384
@@ -140,6 +161,11 @@ SRC_tb_p4_perf := $(FILL_RTL) \
 	$(RTL)/argon2/argon2_mem_xbar.sv \
 	$(RTL)/argon2/argon2_axi_mm.sv \
 	tb_ddr4_ram.sv
+
+concperf: run-tb_conc_perf
+
+concperf250: CONC_MHZ = 250
+concperf250: concperf
 
 p4perf: run-tb_p4_perf
 
@@ -167,6 +193,15 @@ run-tb_p4_perf: tb_p4_perf.sv tb_ddr4_ram.sv
 	@ln -sf Vtb_p4_perf__pch.h $(OBJ)/tb_p4_perf/Vtb_p4_perf__pch.h.slow
 	@$(MAKE) -s -C $(OBJ)/tb_p4_perf -f Vtb_p4_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
 	./$(OBJ)/tb_p4_perf/tb_p4_perf
+
+run-tb_conc_perf: tb_conc_perf.sv tb_ddr4_ram.sv
+	@rm -rf $(OBJ)/tb_conc_perf
+	@mkdir -p $(OBJ)/tb_conc_perf
+	$(VERILATOR) $(VFLAGS) -GNBLK=$(CONC_BLKS) -GN_P=$(CONC_NP) -GTYPE_I=$(CONC_TYPE) -GNCTX=$(CONC_CTXS) -GPERF_MHZ=$(CONC_MHZ) --Mdir $(OBJ)/tb_conc_perf --main --exe --cc -o tb_conc_perf tb_conc_perf.sv $(SRC_tb_conc_perf) --top-module tb_conc_perf
+	@ln -sf Vtb_conc_perf__pch.h $(OBJ)/tb_conc_perf/Vtb_conc_perf__pch.h.fast
+	@ln -sf Vtb_conc_perf__pch.h $(OBJ)/tb_conc_perf/Vtb_conc_perf__pch.h.slow
+	@$(MAKE) -s -C $(OBJ)/tb_conc_perf -f Vtb_conc_perf.mk CFG_CXXFLAGS_PCH_I=-include CXXFLAGS="$(VCXXFLAGS)"
+	./$(OBJ)/tb_conc_perf/tb_conc_perf
 
 run-tb_perf: tb_perf.sv tb_ddr4_ram.sv
 	@rm -rf $(OBJ)/tb_perf
@@ -216,7 +251,7 @@ endif
 .PHONY: all blake2b blamka index compress addr fill discipline rfc p4 fabric hbmperf hbmperf-sweep multi axi axibig sweep cl perf p4perf perf250 perf-all ddrceil vectors clean
 .SECONDARY:   # keep the built .out / model dirs between targets
 
-all: blake2b blamka index compress addr fill discipline rfc p4 fabric multi axi axibig sweep
+all: blake2b blamka index compress addr fill discipline rfc p4 fabric multi conc axi axibig sweep
 
 vectors: $(GEN)/fill_i_init.hex
 
@@ -236,6 +271,7 @@ p4:      vectors run-tb_argon2_p4
 fabric:  run-tb_argon2_block_fabric
 hbmperf: run-tb_hbm_fabric_perf
 multi:   vectors run-tb_argon2_multi_ctx
+conc:    vectors run-tb_argon2_conc
 axi:     vectors run-tb_argon2_axi
 axibig:  vectors run-tb_argon2_axi_big
 sweep:   vectors run-tb_argon2_axi_sweep

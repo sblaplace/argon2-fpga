@@ -38,3 +38,4 @@ sim/obj/
 .vscode/
 *~
 .tools/
+sim/obj_dir/
