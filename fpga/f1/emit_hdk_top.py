@@ -29,6 +29,12 @@ def parse_args() -> argparse.Namespace:
         help="parallel P units to bake into the generated top (1,2,4,8); default: 8",
     )
     parser.add_argument(
+        "--ctxs-per-ch",
+        type=int,
+        default=3,
+        help="contexts per DDR channel (1..4); default: 3",
+    )
+    parser.add_argument(
         "--module-name",
         default="cl_dram_dma",
         help="module name the generated wrapper should expose; default: cl_dram_dma",
@@ -77,7 +83,7 @@ def load_sources(root: Path) -> list[Path]:
     return deduped
 
 
-def render(module_name: str, np: int, out_path: Path, sources: list[Path], root: Path) -> str:
+def render(module_name: str, np: int, ctxs_per_ch: int, out_path: Path, sources: list[Path], root: Path) -> str:
     out_dir = out_path.resolve().parent
     include_lines = []
     for src in sources:
@@ -90,9 +96,11 @@ def render(module_name: str, np: int, out_path: Path, sources: list[Path], root:
         f"// Source checkout: {root}",
         f"// Top module: {module_name}",
         f"// Default N_P: {np}",
+        f"// Default CTXS_PER_CH: {ctxs_per_ch}",
         "",
         f"`define A2_CL_TOP {module_name}",
         f"`define A2_DEFAULT_N_P {np}",
+        f"`define A2_DEFAULT_CTXS_PER_CH {ctxs_per_ch}",
         "",
     ]
     body.extend(include_lines)
@@ -107,11 +115,14 @@ def main() -> int:
     if not MODULE_RE.fullmatch(args.module_name):
         raise SystemExit(f"invalid module name: {args.module_name!r}")
 
+    if args.ctxs_per_ch < 1 or args.ctxs_per_ch > 4:
+        raise SystemExit(f"--ctxs-per-ch must be between 1 and 4, got {args.ctxs_per_ch}")
+
     root = Path(args.root).resolve()
     out_path = Path(args.out).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sources = load_sources(root)
-    out_path.write_text(render(args.module_name, args.np, out_path, sources, root))
+    out_path.write_text(render(args.module_name, args.np, args.ctxs_per_ch, out_path, sources, root))
     print(f"wrote {out_path}")
     return 0
 

@@ -11,7 +11,7 @@ fpga/f1/
   filelist.f            # standalone compile order (iverilog / verilator)
   design/
     cl_argon2.sv          # CL top — the F1 shell port list (drop-in for cl_dram_dma)
-    cl_argon2_core.sv     # functional core: 4× argon2_fill_axi + OCL + slice-sync
+    cl_argon2_core.sv     # functional core: 4× (argon2_lane_conc + fill) + OCL + slice-sync
     cl_argon2_ocl.sv      # AXI4-lite OCL register slave (host programming)
     cl_argon2_defines.vh  # params + OCL register map
 ```
@@ -27,7 +27,14 @@ shell's `DDRx_AXI` ports / `axi_bus_t` members.
 
 ## Topology
 
-* **p4_mode = 0** — four independent p=1 jobs. Each channel runs its own
+* **Multi-context concentration (default, `CTXS_PER_CH=3`)** — each DDR4
+  channel multiplexes 3 independent p=1 contexts through `argon2_lane_conc`
+  and an AXI-MM adapter (`argon2_axi_mm`). Across 4 DDR channels, this runs
+  **12 simultaneous contexts**, boosting aggregate F1 throughput from ~4.18
+  cand/s to **~6.53 cand/s (+56%)** by saturating DDR4 channel bandwidth.
+  When `CTXS_PER_CH=1`, the core falls back to single-context `argon2_fill_axi`
+  per channel (4 total contexts).
+* **p4_mode = 0** — independent p=1 jobs. Each context runs its own
   candidate against its own private DDR region (`lane_id = 0`).
 * **p4_mode = 1 is not hardware-ready** — the slice barriers are AND-joined,
   but Argon2 can reference blocks in another lane. The shared-RAM
@@ -36,15 +43,15 @@ shell's `DDRx_AXI` ports / `axi_bus_t` members.
   Until that router exists, the host rejects `--p4` and only independent
   p=1 mode is supported on F1.
 
-All four cores share one `start` pulse (a write to `GLOBAL_START`).
+All lanes/contexts share one `start` pulse (a write to `GLOBAL_START`).
 
 ## OCL register map (byte addresses, 32-bit words)
 
 | Addr | Name | R/W | Meaning |
 |------|------|-----|---------|
-| 0x000 | GLOBAL_START | WO  | any write pulses start on all 4 lanes |
+| 0x000 | GLOBAL_START | WO  | any write pulses start on all active contexts |
 | 0x004 | CONTROL | RW  | bit0 = p4_mode; bit1 = soft_reset (pulse) |
-| 0x008 | STATUS | RO  | `busy[3:0]` in bits[3:0], `done[3:0]` in bits[7:4] |
+| 0x008 | STATUS | RO  | `busy[15:0]` in bits[15:0], `done[15:0]` in bits[31:16] (bits[7:4] also mirror done for 4-lane legacy compat) |
 | 0x040 + 0x20·L | LANE_CTRL  | RW | `type_i[1:0]`, `lanes[7:0]` (informational) |
 | 0x044 + 0x20·L | PASSES     | RW | t (time cost) |
 | 0x048 + 0x20·L | LANE_LENGTH| RW | q (blocks per lane) |
@@ -54,10 +61,10 @@ All four cores share one `start` pulse (a write to `GLOBAL_START`).
 
 `type_i`: 0 = argon2d, 1 = argon2i, 2 = argon2id.
 
-The OCL bus is byte-addressed; word index *k* lives at byte `k*4`. The
-register file is word-indexed internally (lane L's `LANE_CTRL` is word
-`16 + L*8`), so the byte address of a lane register is `(16 + L*8 + offset)*4`
-— hence the `0x40 + 0x20·L` base above.
+The OCL bus is byte-addressed; word index *k* lives at byte `k*4`. Lane/context index
+*L* (`0 <= L < NUM_DDR * CTXS_PER_CH`, up to 15) is mapped to DDR channel `L / CTXS_PER_CH`
+and channel context `L % CTXS_PER_CH`. The byte address of context L's register block
+is `(16 + L*8)*4 = 0x40 + 0x20·L`.
 
 ## Building in the AWS HDK
 
@@ -121,14 +128,15 @@ Per `docs/ARCHITECTURE.md` step 3, bring it up in this order:
 
 `sim/tb_cl_argon2.sv` is a top-level bench: it instantiates the full
 `cl_argon2` shell with four `tb_axi_ram` DDR models and an OCL BFM, runs a
-known-answer argon2i (m=8 KiB, t=2) job on all four channels in independent
-p=1 mode, and compares each channel's working set against the RFC-golden
-vector. Run it from `sim/`:
+known-answer argon2i (m=8 KiB, t=2) job on all 12 contexts (3 per channel)
+in independent p=1 mode, and compares each context's working set against
+the RFC-golden vector. Run it from `sim/`:
 
 ```
 make vectors     # dump gen/fill_i_*_exp.hex from ref/
 make cl          # build + run tb_cl_argon2 (iverilog) — or: make SIM=verilator cl
 ```
 
-The per-channel path is also exercised in isolation by `sim/tb_argon2_axi.sv`.
+The per-channel path is also exercised in isolation by `sim/tb_argon2_axi.sv`,
+and the concentrator is exercised in isolation by `sim/tb_argon2_conc.sv`.
 

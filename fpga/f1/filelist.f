@@ -22,6 +22,7 @@
 ../../rtl/argon2/argon2_addr_gen.sv
 ../../rtl/argon2/argon2_fill_ctrl.sv
 ../../rtl/argon2/argon2_fill_job.sv
+../../rtl/argon2/argon2_lane_conc.sv
 ../../rtl/argon2/argon2_axi_mm.sv
 ../../rtl/argon2/argon2_fill_axi.sv
 design/cl_argon2_ocl.sv

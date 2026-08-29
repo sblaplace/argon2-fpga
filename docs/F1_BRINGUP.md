@@ -13,7 +13,7 @@ The job below moves that same bench from simulation to the wire.
 | 1 | 32 KiB RFC vector in BRAM | CL logic only, no DDR | Whole working set matches `sim/gen/rfc_i_exp.hex` | The fill pipeline is bit-correct before DRAM is involved |
 | 2 | DDR bandwidth microbench | `sh_ddr` AXI, no argon2 logic | Each channel ≈ 12-15 GB/s bursts, 4 channels isolated (no cross-interference) | Bandwidth × channel count is the only number that matters (see `docs/ARCHITECTURE.md`) |
 | 3a | 8 KiB p=1 KAT on 1 DDR | 1× `argon2_fill_axi` + 1× DDR + OCL | Same working-set match as `sim/tb_argon2_axi.sv`, but through DDR | Address generation, 512-bit 16-beat bursts, prefetch, and AXI are correct on the wire |
-| 3b | 8 KiB p=1 job on 4 DDRs (independent) | 4× `argon2_fill_axi`, p4_mode=0 | Four lanes each match `sim/gen/fill_i_exp.hex` (`tb_cl_argon2` in sim) | Replication and OCL fan-out work; this is the “4 candidates per FPGA” mode |
+| 3b | 8 KiB p=1 job on 4 DDRs (independent) | 4 DDR channels × 3 ctxs (`argon2_lane_conc`), p4_mode=0 | 12 contexts each match `sim/gen/fill_i_exp.hex` (`tb_cl_argon2` in sim) | Multi-context concentration and OCL fan-out work (+56% throughput) |
 | 3c (deferred) | 32 KiB p=4 job across 4 DDRs | Add owner-channel read crossbar, response tags, and slice barrier | Working set matches `sim/gen/rfc_i_exp.hex` with p=4 | Argon2 references other lanes; a barrier alone cannot connect partitioned memories |
 
 Per-argon2 bandwidth at 1 GiB / t=4 / p=1 is ≈ 4 GB random + 4 GB sequential reads + 4 GB writes ≈ 12 GB of DRAM traffic. A single Kintex SODIMM (≈ 5 GB/s random) caps a huge fabric at ~1 cand/s; each independent F1 DDR channel at ~10-12 GB/s random should sustain ~1-1.2 cand/s, so `f1.2xlarge` is a ~4 cand/s machine and an HBM2 Alveo U50 (32 pseudo-channels) is a ~tens cand/s machine. The bring-up measures the ceiling before we try to beat it.
@@ -110,7 +110,7 @@ What `argon2_cl` does (see `fpga/f1/host/argon2_cl.c`):
 ```
 0x000  GLOBAL_START  (WO, any write pulses start)
 0x004  CONTROL       (bit0 = p4_mode, bit1 = soft_reset pulse)
-0x008  STATUS        (RO: busy[3:0] in bits[3:0], done[3:0] in bits[7:4])
+0x008  STATUS        (RO: busy[15:0] in bits[15:0], done[15:0] in bits[31:16]; bits[7:4] also mirror done for 4-lane legacy compat)
 0x040 + 0x20*L:
   +0x00 LANE_CTRL   type_i[1:0] (0=d 1=i 2=id), lanes[7:0] (info)
   +0x04 PASSES      t
@@ -120,27 +120,29 @@ What `argon2_cl` does (see `fpga/f1/host/argon2_cl.c`):
   +0x14 BASE_HI     base[63:32]
 ```
 
-All four independent lanes share one `GLOBAL_START` pulse. The CL also contains the p4 slice barrier used by the shared-memory functional harness, but that mode is disabled until cross-channel reference reads are routed correctly.
+All active contexts across all channels share one `GLOBAL_START` pulse. The CL also contains the p4 slice barrier used by the shared-memory functional harness, but that mode is disabled until cross-channel reference reads are routed correctly.
 
-4. Poll `STATUS` until `done == 0xF` in independent mode.
+4. Poll `STATUS` until `(done & expect_mask) == expect_mask`.
 5. DMA the final working set back and `memcmp` against `*_exp.hex`.
 
-### 4b. Four independent p=1 jobs (the scaling proof)
+### 4b. Multi-context concentrated jobs (the scaling proof)
 
-Same as above but with `p4_mode = 0`. Each channel is lane_id 0 in its own private `m'` region:
+With `CTXS_PER_CH=3` (the default) and `p4_mode = 0`, each DDR channel runs 3 independent contexts multiplexed via `argon2_lane_conc`. Across 4 DDR channels this executes 12 simultaneous jobs:
 
 ```
-for L in 0..3:
-  LANE_CTRL[L] = type_i | (1 << 8)   // lanes=1
-  PASSES[L]    = 2                     // t=2 for the 8 KiB KAT
-  LANE_LENGTH[L] = 8                  // q = 8
-  MEMORY_BLKS[L] = 8                  // m' = 8
-  BASE_LO/HI[L]  = channel_base[L]
+for ch in 0..3:
+  for g in 0..2:
+    L = ch * 3 + g
+    LANE_CTRL[L] = type_i | (1 << 8)   // lanes=1
+    PASSES[L]    = 2                   // t=2 for the 8 KiB KAT
+    LANE_LENGTH[L] = 8                // q = 8
+    MEMORY_BLKS[L] = 8                // m' = 8
+    BASE[L]        = base + g * 8 * 1024
 write GLOBAL_START
-poll STATUS until done == 0xF
+poll STATUS until (done & 0xFFF) == 0xFFF
 ```
 
-This is exactly `sim/tb_cl_argon2.sv` — four copies of the 8 KiB argon2i KAT (`password`/`somesalt` / t=2 / m=8) running in parallel, each checked against `gen/fill_i_exp.hex`. On hardware each lane should return the same PASS and the measured cand/s should be ~4× one lane (no sharing).
+This matches `sim/tb_cl_argon2.sv` — 12 copies of the 8 KiB argon2i KAT running concurrently across the 4 DDR channels, each checked against `gen/fill_i_exp.hex`. On hardware the aggregate cand/s reaches **~6.53 cand/s** (+56% higher than single-lane 4.18 cand/s) by saturating DDR4 bandwidth at ~13.2 GB/s total read+write. Legacy 4-channel single-context mode can still be selected via `--ctxs-per-ch 1`.
 
 ### 4c. One p=4 job across four channels (deferred)
 

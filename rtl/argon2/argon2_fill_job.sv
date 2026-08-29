@@ -94,7 +94,8 @@ module argon2_fill_job #(
                 .mem_wr_ready  (mem_wr_ready[gi]),
                 .mem_wr_addr   (mem_wr_addr[gi]),
                 .mem_wr_data   (mem_wr_data[gi]),
-                .mem_wr_last   (mem_wr_last[gi])
+                .mem_wr_last   (mem_wr_last[gi]),
+                .state_o       ()
             );
         end
     endgenerate

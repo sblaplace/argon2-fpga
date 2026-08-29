@@ -36,9 +36,14 @@
 `define A2_DEFAULT_N_P 1
 `endif
 
+`ifndef A2_DEFAULT_CTXS_PER_CH
+`define A2_DEFAULT_CTXS_PER_CH 3
+`endif
+
 module `A2_CL_TOP #(
-    parameter int NUM_DDR = `A2_NUM_DDR,
-    parameter int N_P     = `A2_DEFAULT_N_P   // parallel P units in the compression G
+    parameter int NUM_DDR     = `A2_NUM_DDR,
+    parameter int CTXS_PER_CH = `A2_DEFAULT_CTXS_PER_CH,
+    parameter int N_P         = `A2_DEFAULT_N_P   // parallel P units in the compression G
 ) (
     // ---- clock / reset -------------------------------------------------
     input        clk_main_a0,
@@ -141,7 +146,11 @@ module `A2_CL_TOP #(
     assign cl_sh_peek_data = 32'd0;
 
     // ---- Functional core (pure pass-through of the flat DDR buses) ----
-    cl_argon2_core #(.NUM_DDR(NUM_DDR), .N_P(N_P)) u_core (
+    cl_argon2_core #(
+        .NUM_DDR(NUM_DDR),
+        .CTXS_PER_CH(CTXS_PER_CH),
+        .N_P(N_P)
+    ) u_core (
         .clk        (clk_main_a0),
         .rst_n      (rst_n),
 

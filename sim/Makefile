@@ -87,7 +87,8 @@ SRC_tb_cl_argon2 := \
 	$(RTL)/argon2/blamka_g.sv $(RTL)/argon2/argon2_p.sv $(RTL)/argon2/argon2_compress.sv \
 	$(RTL)/argon2/argon2_index.sv \
 	$(RTL)/argon2/argon2_addr_gen.sv $(RTL)/argon2/argon2_fill_ctrl.sv \
-	$(RTL)/argon2/argon2_fill_job.sv $(RTL)/argon2/argon2_axi_mm.sv $(RTL)/argon2/argon2_fill_axi.sv \
+	$(RTL)/argon2/argon2_fill_job.sv $(RTL)/argon2/argon2_lane_conc.sv \
+	$(RTL)/argon2/argon2_axi_mm.sv $(RTL)/argon2/argon2_fill_axi.sv \
 	$(F1DES)/cl_argon2_ocl.sv \
 	$(F1DES)/cl_argon2_core.sv $(F1DES)/cl_argon2.sv \
 	tb_axi_ram.sv
@@ -334,6 +335,8 @@ cl: vectors run-tb_cl_argon2
 
 ifeq ($(SIM),verilator)
 run-tb_cl_argon2: tb_cl_argon2.sv
+	@rm -rf $(OBJ)/tb_cl_argon2
+	@mkdir -p $(OBJ)/tb_cl_argon2
 	$(VERILATOR) $(VFLAGS) -I$(F1DES) --Mdir $(OBJ)/tb_cl_argon2 --main --exe --cc -o tb_cl_argon2 tb_cl_argon2.sv $(SRC_tb_cl_argon2) --top-module tb_cl_argon2
 	@ln -sf Vtb_cl_argon2__pch.h $(OBJ)/tb_cl_argon2/Vtb_cl_argon2__pch.h.fast
 	@ln -sf Vtb_cl_argon2__pch.h $(OBJ)/tb_cl_argon2/Vtb_cl_argon2__pch.h.slow

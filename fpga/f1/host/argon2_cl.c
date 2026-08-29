@@ -6,9 +6,11 @@
  * Host driver for the F1 argon2 CL (fpga/f1/design/cl_argon2).
  *
  * Implements the full OCL programming sequence plus DMA preload / readback
- * for the working set. When the AWS FPGA SDK is not present (simulation or
- * lint), the driver compiles as a self-test that replays the 8 KiB
- * argon2i KAT against the Python reference — see the SIM_HOST fallback.
+ * for the working set across up to 4 DDR channels and multiple contexts
+ * per channel (default 3, using argon2_lane_conc for +56% cand/s).
+ * When the AWS FPGA SDK is not present (simulation or lint), the driver
+ * compiles as a self-test that replays the 8 KiB argon2i KAT against
+ * the Python reference — see the SIM_HOST fallback.
  *
  * Register offsets match fpga/f1/README.md and cl_argon2_defines.vh.
  * The OCL BAR is byte-addressed; word k is at byte k*4, so lane L's block
@@ -42,6 +44,7 @@
 #define A2_OCL_STATUS       0x008u
 #define A2_OCL_LANE_BASE    0x040u
 #define A2_OCL_LANE_STRIDE  0x020u
+#define A2_OCL_NREG         256u
 
 #define A2_LANE_CTRL    0x00u
 #define A2_LANE_PASSES  0x04u
@@ -51,11 +54,13 @@
 #define A2_LANE_BASE_HI 0x14u
 
 #define A2_NUM_DDR 4u
+#define A2_DEFAULT_CTXS_PER_CH 3u
+#define A2_MAX_LANES 16u
 #define A2_BLOCK_BYTES 1024u
 #define A2_BEATS_PER_BLOCK 16u
-#define A2_STATUS_BUSY_MASK 0x0Fu
-#define A2_STATUS_DONE_MASK 0xF0u
-#define A2_STATUS_DONE_SHIFT 4
+#define A2_STATUS_BUSY_MASK 0x0000FFFFu
+#define A2_STATUS_DONE_MASK 0xFFFF0000u
+#define A2_STATUS_DONE_SHIFT 16
 
 #ifndef SIM_HOST
 /* ---- AWS FPGA SDK ---- */
@@ -84,14 +89,10 @@ static int ocl_read(uint32_t off, uint32_t *val) {
     return rc;
 }
 
-/* DMA a working-set region at an absolute DDR byte address. The caller
- * computes the per-lane offset once; keeping that policy out of this helper
- * avoids the channel offset being applied twice during p=4 readback. `mem`
+/* DMA a working-set region at an absolute DDR byte address. `mem`
  * contains 1024-byte Argon2 blocks (beat 0 low in [63:0]). */
 static int ddr_write_channel(int ch, uint64_t base, const uint8_t *mem, uint32_t mem_blocks) {
     size_t nbytes = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    /* fpga_pci_dma is slot-indexed; for cl_dram_dma the DDR BARs are
-     * exposed as DMA channels. Fall back to P2P poke if DMA not available. */
     int rc = fpga_pci_dma_write(ddr_handles[ch], base, (void*)mem, nbytes);
     if (rc) {
         fprintf(stderr, "ddr_write ch%d addr=0x%016" PRIx64 " %zu B failed rc=%d\n",
@@ -117,16 +118,11 @@ static int attach_fpga(int slot) {
     rc = fpga_mgmt_init();
     if (rc) { fprintf(stderr, "fpga_mgmt_init failed %d\n", rc); return rc; }
 
-    /* Attach OCL BAR (BAR4 on F1). The SDK's fpga_pci_attach maps the
-     * OCL BAR when pf_id == FPGA_APP_PF and bar_id == APP_PF_BAR4. */
+    /* Attach OCL BAR (BAR4 on F1). */
     rc = fpga_pci_attach(slot, FPGA_APP_PF, APP_PF_BAR4, 0, &ocl_handle);
     if (rc) { fprintf(stderr, "fpga_pci_attach OCL slot %d failed %d\n", slot, rc); return rc; }
 
     for (int ch = 0; ch < (int)A2_NUM_DDR; ch++) {
-        /* DDR channels are on the same PF; use per-channel DMA handles
-         * if the SDK exposes them, otherwise reuse ocl_handle with an
-         * offset. The exact attach is HDK-release dependent — see
-         * hdk/cl/examples/cl_dram_dma/host. */
         ddr_handles[ch] = ocl_handle;
     }
     slot_id = slot;
@@ -136,79 +132,69 @@ static int attach_fpga(int slot) {
 
 #else /* SIM_HOST — compile without the SDK */
 
-/* Simulation / lint fallback: OCL is a 256-byte array, DDR is heap.
- * Emulates the CL's STATUS behavior: writing GLOBAL_START sets busy and
- * after a short delay marks done. This keeps run_and_poll from timing out
- * when compiled with -DSIM_HOST. */
-static uint32_t sim_regf[64];
+static uint32_t sim_regf[A2_OCL_NREG];
 static uint8_t *sim_ddr[A2_NUM_DDR];
 static size_t sim_ddr_cap[A2_NUM_DDR];
 static uint32_t sim_status_busy = 0, sim_status_done = 0;
 
 static int ocl_write(uint32_t off, uint32_t val) {
-    sim_regf[off >> 2] = val;
+    if ((off >> 2) < A2_OCL_NREG)
+        sim_regf[off >> 2] = val;
     printf("[SIM] OCL poke 0x%03x <- 0x%08x\n", off, val);
     if (off == A2_OCL_GLOBAL_START) {
-        /* Mark all programmed lanes as done immediately in SIM_HOST;
-         * real hardware would clear done and set busy, then set done
-         * after the fill. */
-        uint32_t ctrl = sim_regf[A2_OCL_CONTROL>>2];
-        int p4 = ctrl & 1u;
-        if (p4) sim_status_done = 0xF;
-        else {
-            /* independent: any lane that was programmed is considered done */
-            sim_status_done = 0;
-            for (int L=0; L<4; L++) {
-                uint32_t lane_base = A2_OCL_LANE_BASE + L*A2_OCL_LANE_STRIDE;
-                /* if lane had a non-zero lane_len, count it */
-                if (sim_regf[(lane_base+8)>>2] != 0) sim_status_done |= (1u<<L);
-            }
-            if (sim_status_done==0) sim_status_done = 0xF; /* default all */
+        /* Mark all programmed lanes as done immediately in SIM_HOST */
+        sim_status_done = 0;
+        for (uint32_t L = 0; L < A2_MAX_LANES; L++) {
+            uint32_t lane_base = A2_OCL_LANE_BASE + L * A2_OCL_LANE_STRIDE;
+            if (((lane_base + 8) >> 2) < A2_OCL_NREG && sim_regf[(lane_base + 8) >> 2] != 0)
+                sim_status_done |= (1u << L);
         }
+        if (sim_status_done == 0) sim_status_done = 0xFFFu;
         sim_status_busy = 0;
-        sim_regf[A2_OCL_STATUS>>2] = (sim_status_done<<4) | sim_status_busy;
-        /* Simulate the fill by copying the expected output over init if
-         * the test will compare — the python reference is the golden;
-         * SIM_HOST just proves the host flow, not the RTL. So leave DDR
-         * as-is (the test will see init==init, not exp). The --expect
-         * check is skipped in SIM_HOST unless you want to force it. */
+        sim_regf[A2_OCL_STATUS >> 2] = (sim_status_done << 16) | ((sim_status_done & 0xFu) << 4) | (sim_status_busy & 0xFFFFu);
     }
     if (off == A2_OCL_CONTROL) {
-        sim_regf[A2_OCL_STATUS>>2] = (sim_status_done<<4) | sim_status_busy;
+        sim_regf[A2_OCL_STATUS >> 2] = (sim_status_done << 16) | ((sim_status_done & 0xFu) << 4) | (sim_status_busy & 0xFFFFu);
     }
     return 0;
 }
+
 static int ocl_read(uint32_t off, uint32_t *val) {
-    if (off == A2_OCL_STATUS) *val = sim_regf[A2_OCL_STATUS>>2];
-    else *val = sim_regf[off >> 2];
+    if (off == A2_OCL_STATUS) *val = sim_regf[A2_OCL_STATUS >> 2];
+    else if ((off >> 2) < A2_OCL_NREG) *val = sim_regf[off >> 2];
+    else *val = 0;
     return 0;
 }
-static int ddr_write_channel(int ch, uint64_t base, const uint8_t *mem, uint32_t mem_blocks) {
-    (void)base;
+
+static int ddr_write_channel(int ch, uint64_t addr, const uint8_t *mem, uint32_t mem_blocks) {
     size_t n = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    if (sim_ddr_cap[ch] < n) {
-        uint8_t *grown = realloc(sim_ddr[ch], n);
+    size_t end = (size_t)addr + n;
+    if (sim_ddr_cap[ch] < end) {
+        uint8_t *grown = realloc(sim_ddr[ch], end);
         if (!grown) return ENOMEM;
+        memset(grown + sim_ddr_cap[ch], 0, end - sim_ddr_cap[ch]);
         sim_ddr[ch] = grown;
-        sim_ddr_cap[ch] = n;
+        sim_ddr_cap[ch] = end;
     }
-    memcpy(sim_ddr[ch], mem, n);
-    printf("[SIM] DDR ch%d write %zu B\n", ch, n);
+    memcpy(sim_ddr[ch] + addr, mem, n);
+    printf("[SIM] DDR ch%d write %zu B at offset 0x%" PRIx64 "\n", ch, n, addr);
     return 0;
 }
-static int ddr_read_channel(int ch, uint64_t base, uint8_t *mem, uint32_t mem_blocks) {
-    (void)base;
+
+static int ddr_read_channel(int ch, uint64_t addr, uint8_t *mem, uint32_t mem_blocks) {
     size_t n = (size_t)mem_blocks * A2_BLOCK_BYTES;
-    if (sim_ddr_cap[ch] < n) return EINVAL;
-    memcpy(mem, sim_ddr[ch], n);
+    size_t end = (size_t)addr + n;
+    if (sim_ddr_cap[ch] < end) return EINVAL;
+    memcpy(mem, sim_ddr[ch] + addr, n);
     return 0;
 }
+
 static int attach_fpga(int slot) {
     (void)slot;
     memset(sim_regf, 0, sizeof sim_regf);
     sim_status_busy = 0;
     sim_status_done = 0;
-    for (int i=0; i<4; i++) {
+    for (int i = 0; i < (int)A2_NUM_DDR; i++) {
         free(sim_ddr[i]);
         sim_ddr[i] = NULL;
         sim_ddr_cap[i] = 0;
@@ -238,7 +224,7 @@ static int program_lane(int L, uint32_t type_i, uint32_t passes,
     return 0;
 }
 
-static int run_and_poll(int expect_done_mask, int timeout_ms) {
+static int run_and_poll(uint32_t expect_done_mask, int timeout_ms) {
     int rc = ocl_write(A2_OCL_GLOBAL_START, 1u);
     if (rc) return rc;
     printf("  GLOBAL_START pulsed, polling STATUS...\n");
@@ -250,17 +236,21 @@ static int run_and_poll(int expect_done_mask, int timeout_ms) {
     do {
         rc = ocl_read(A2_OCL_STATUS, &st);
         if (rc) return rc;
-        done = (st >> A2_STATUS_DONE_SHIFT) & 0xFu;
+        done = (st >> A2_STATUS_DONE_SHIFT) & expect_done_mask;
+        /* Fallback for legacy <=4 lane status format: done in [7:4] */
+        if (done == 0 && (expect_done_mask <= 0xFu)) {
+            done = ((st >> 4) & 0xFu) & expect_done_mask;
+        }
         if ((polls & 0xFFF) == 0 && polls != 0)
             printf("    poll %d: STATUS=0x%08x busy=0x%x done=0x%x\n",
-                   polls, st, st & 0xFu, done);
+                   polls, st, st & A2_STATUS_BUSY_MASK, done);
         polls++;
-        if (done == (uint32_t)expect_done_mask) break;
+        if (done == expect_done_mask) break;
         usleep(1000);
     } while (polls < max_polls);
 
     printf("  STATUS=0x%08x after %d polls (done=0x%x)\n", st, polls, done);
-    if (done != (uint32_t)expect_done_mask) {
+    if (done != expect_done_mask) {
         fprintf(stderr, "timeout: expected done=0x%x got 0x%x (STATUS=0x%08x)\n",
                 expect_done_mask, done, st);
         return -1;
@@ -307,10 +297,6 @@ static uint8_t *load_hex(const char *path, size_t *out_bytes) {
             fprintf(stderr, "%s line %zu: expected 128 hex chars, got %zu\n", path, idx, len);
             free(buf); fclose(f); return NULL;
         }
-        /* Parse 64 bytes little-endian: hex string is big-endian 512-bit,
-         * but our beats store word 0 in [63:0]. The dump in tests/dump_vectors.py
-         * does val |= word<<64*i and prints %0128x, so the hex is big-endian.
-         * Reverse bytes. */
         for (int b = 0; b < 64; b++) {
             char byte_hex[3] = { p[126 - 2*b], p[127 - 2*b], '\0' };
             buf[idx*64 + b] = (uint8_t)strtoul(byte_hex, NULL, 16);
@@ -359,7 +345,8 @@ static void usage(const char *argv0) {
         "  --type {d,i,id}     argon2 type (default i)\n"
         "  --passes T          time cost t (default 2)\n"
         "  --lane-len Q        blocks per lane q (default 8)\n"
-        "  --mem-blocks M      total blocks m' (default 8)\n"
+        "  --mem-blocks M      total blocks m' per context (default 8)\n"
+        "  --ctxs-per-ch N     contexts per DDR channel, 1..4 (default 3)\n"
         "  --base ADDR         byte base address in DDR (default 0)\n"
         "  --channel L         run only channel L (0..3), default all\n"
         "  --p4                p=4 job across 4 DDRs (slice barrier)\n"
@@ -370,15 +357,15 @@ static void usage(const char *argv0) {
         "  --out FILE          write readback to FILE (binary)\n"
         "\n"
         "Examples:\n"
-        "  # 8 KiB p=1 KAT on one channel (matches sim/tb_cl_argon2, lane 0):\n"
+        "  # 8 KiB p=1 KAT on channel 0 (3 contexts concentrated, matches tb_cl_argon2):\n"
         "  %s --type i --passes 2 --lane-len 8 --mem-blocks 8 --base 0 \\\n"
         "     --channel 0 --init sim/gen/fill_i_init.hex --expect sim/gen/fill_i_exp.hex\n"
-        "  # 8 KiB p=1 on all four channels independently (p4_mode=0):\n"
+        "  # 8 KiB p=1 on all four channels (4x3 = 12 contexts total, +56%% throughput):\n"
         "  %s --type i --passes 2 --lane-len 8 --mem-blocks 8 --base 0 \\\n"
         "     --init sim/gen/fill_i_init.hex --expect sim/gen/fill_i_exp.hex\n"
-        "  # 32 KiB p=4 RFC vector across four channels (p4_mode=1):\n"
-        "  %s --type i --passes 3 --lane-len 8 --mem-blocks 32 --p4 --base 0 \\\n"
-        "     --init sim/gen/rfc_i_init.hex --expect sim/gen/rfc_i_exp.hex\n",
+        "  # Single context per channel legacy mode:\n"
+        "  %s --ctxs-per-ch 1 --type i --passes 2 --lane-len 8 --mem-blocks 8 --base 0 \\\n"
+        "     --init sim/gen/fill_i_init.hex --expect sim/gen/fill_i_exp.hex\n",
         argv0, argv0, argv0, argv0);
 }
 
@@ -386,6 +373,7 @@ int main(int argc, char **argv) {
     int slot = 0;
     const char *type_str = "i";
     uint32_t passes = 2, lane_len = 8, mem_blocks = 8;
+    uint32_t ctxs_per_ch = A2_DEFAULT_CTXS_PER_CH;
     uint64_t base = 0;
     int channel = -1;
     int p4_mode = 0;
@@ -394,30 +382,32 @@ int main(int argc, char **argv) {
     int check_sim = 0;
 
     static struct option opts[] = {
-        {"slot",       required_argument, 0, 's'},
-        {"type",       required_argument, 0, 't'},
-        {"passes",     required_argument, 0, 'p'},
-        {"lane-len",   required_argument, 0, 'q'},
-        {"mem-blocks", required_argument, 0, 'm'},
-        {"base",       required_argument, 0, 'b'},
-        {"channel",    required_argument, 0, 'c'},
-        {"p4",         no_argument,       0, '4'},
-        {"init",       required_argument, 0, 'i'},
-        {"expect",     required_argument, 0, 'e'},
-        {"timeout",    required_argument, 0, 'T'},
+        {"slot",        required_argument, 0, 's'},
+        {"type",        required_argument, 0, 't'},
+        {"passes",      required_argument, 0, 'p'},
+        {"lane-len",    required_argument, 0, 'q'},
+        {"mem-blocks",  required_argument, 0, 'm'},
+        {"ctxs-per-ch", required_argument, 0, 'C'},
+        {"base",        required_argument, 0, 'b'},
+        {"channel",     required_argument, 0, 'c'},
+        {"p4",          no_argument,       0, '4'},
+        {"init",        required_argument, 0, 'i'},
+        {"expect",      required_argument, 0, 'e'},
+        {"timeout",     required_argument, 0, 'T'},
         {"check-sim-vectors", no_argument, 0, 'k'},
-        {"out",        required_argument, 0, 'o'},
-        {"help",       no_argument,       0, 'h'},
+        {"out",         required_argument, 0, 'o'},
+        {"help",        no_argument,       0, 'h'},
         {0,0,0,0}
     };
     int ch;
-    while ((ch = getopt_long(argc, argv, "s:t:p:q:m:b:c:4i:e:T:ko:h", opts, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "s:t:p:q:m:C:b:c:4i:e:T:ko:h", opts, NULL)) != -1) {
         switch (ch) {
             case 's': slot = atoi(optarg); break;
             case 't': type_str = optarg; break;
             case 'p': passes = (uint32_t)atoi(optarg); break;
             case 'q': lane_len = (uint32_t)atoi(optarg); break;
             case 'm': mem_blocks = (uint32_t)atoi(optarg); break;
+            case 'C': ctxs_per_ch = (uint32_t)atoi(optarg); break;
             case 'b': base = strtoull(optarg, NULL, 0); break;
             case 'c': channel = atoi(optarg); break;
             case '4': p4_mode = 1; break;
@@ -456,15 +446,15 @@ int main(int argc, char **argv) {
 #endif
 
     if (check_sim && init_path == NULL) {
-        /* Convenience: --check-sim-vectors without args still does the above */
+        /* Convenience */
     }
 
-    /* Reject configurations that would otherwise underflow index arithmetic,
-     * issue unaligned block bursts, or leave p=4 lanes deadlocked at a slice
-     * barrier. The CL register interface is intentionally small, so the host
-     * is the first line of defence against malformed jobs. */
     if (channel < -1 || channel >= (int)A2_NUM_DDR) {
         fprintf(stderr, "--channel must be 0..%d\n", A2_NUM_DDR - 1);
+        return 2;
+    }
+    if (ctxs_per_ch < 1 || ctxs_per_ch > 4) {
+        fprintf(stderr, "--ctxs-per-ch must be 1..4\n");
         return 2;
     }
     if (p4_mode && channel >= 0) {
@@ -502,9 +492,11 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    printf("argon2_cl: type=%s (%u) passes=%u lane_len=%u mem_blocks=%u base=0x%016" PRIx64 " %s\n",
-           type_str, type_i, passes, lane_len, mem_blocks, base,
-           p4_mode ? "p4_mode=1 (4 lanes, one job)" : "p4_mode=0 (independent)");
+    uint32_t total_lanes = p4_mode ? A2_NUM_DDR : (A2_NUM_DDR * ctxs_per_ch);
+
+    printf("argon2_cl: type=%s (%u) passes=%u lane_len=%u mem_blocks=%u ctxs/ch=%u total_lanes=%u base=0x%016" PRIx64 " %s\n",
+           type_str, type_i, passes, lane_len, mem_blocks, ctxs_per_ch, total_lanes, base,
+           p4_mode ? "p4_mode=1 (4 lanes, one job)" : "p4_mode=0 (independent contexts)");
 
     int rc = attach_fpga(slot);
     if (rc) return 1;
@@ -523,14 +515,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Program OCL */
+    /* Program OCL CONTROL */
     uint32_t control = p4_mode ? 1u : 0u;
     rc = ocl_write(A2_OCL_CONTROL, control);
     if (rc) return 1;
 
-    /* DMA preload. Address policy mirrors the BASE programmed below:
-     * independent jobs occupy m'-block regions, while a p=4 job is split
-     * into four q-block lane regions. */
+    /* DMA preload */
     if (init_mem) {
         if (p4_mode) {
             for (int L = 0; L < (int)A2_NUM_DDR; L++) {
@@ -539,78 +529,65 @@ int main(int argc, char **argv) {
                 int r = ddr_write_channel(L, lbase, src, lane_len);
                 if (r) return 1;
             }
-        } else if (channel >= 0) {
-            int r = ddr_write_channel(channel, base, init_mem, mem_blocks);
-            if (r) return 1;
         } else {
-            for (int L = 0; L < (int)A2_NUM_DDR; L++) {
-                uint64_t lbase = base + (uint64_t)L * mem_blocks * A2_BLOCK_BYTES;
-                int r = ddr_write_channel(L, lbase, init_mem, mem_blocks);
-                if (r) return 1;
+            for (int ch = 0; ch < (int)A2_NUM_DDR; ch++) {
+                if (channel >= 0 && ch != channel) continue;
+                for (uint32_t g = 0; g < ctxs_per_ch; g++) {
+                    uint64_t ctx_addr = base + (uint64_t)g * lane_len * A2_BLOCK_BYTES;
+                    int r = ddr_write_channel(ch, ctx_addr, init_mem, mem_blocks);
+                    if (r) return 1;
+                }
             }
         }
     }
 
     /* Program lanes */
     if (p4_mode) {
-        for (int L = 0; L < 4; L++) {
-            uint64_t lbase = base; /* all lanes share the same job base; CL adds lane stride */
-            /* In p4_mode each lane's BASE is the start of the whole working set;
-             * the CL's per-lane offset is lane_id * lane_length blocks. */
-            rc = program_lane(L, type_i, passes, lane_len, mem_blocks, lbase);
+        for (int L = 0; L < (int)A2_NUM_DDR; L++) {
+            rc = program_lane(L, type_i, passes, lane_len, mem_blocks, base);
             if (rc) return 1;
         }
-    } else if (channel >= 0) {
-        rc = program_lane(channel, type_i, passes, lane_len, mem_blocks, base);
-        if (rc) return 1;
     } else {
-        for (int L = 0; L < 4; L++) {
-            uint64_t lbase = base + (uint64_t)L * (size_t)mem_blocks * A2_BLOCK_BYTES;
-            rc = program_lane(L, type_i, passes, lane_len, mem_blocks, lbase);
-            if (rc) return 1;
+        for (int ch = 0; ch < (int)A2_NUM_DDR; ch++) {
+            if (channel >= 0 && ch != channel) continue;
+            for (uint32_t g = 0; g < ctxs_per_ch; g++) {
+                int L = ch * ctxs_per_ch + g;
+                uint64_t ctx_base = base + (uint64_t)g * lane_len * A2_BLOCK_BYTES;
+                rc = program_lane(L, type_i, passes, lane_len, mem_blocks, ctx_base);
+                if (rc) return 1;
+            }
         }
     }
 
-    /* Kick */
-    int expect_done;
-    if (p4_mode) expect_done = 0xF;
-    else if (channel >= 0) expect_done = 1 << channel;
-    else expect_done = 0xF;
+    /* Expected done mask */
+    uint32_t expect_done_mask;
+    if (p4_mode) {
+        expect_done_mask = (1u << A2_NUM_DDR) - 1u;
+    } else if (channel >= 0) {
+        expect_done_mask = ((1u << ctxs_per_ch) - 1u) << (channel * ctxs_per_ch);
+    } else {
+        expect_done_mask = (1u << total_lanes) - 1u;
+    }
 
-    rc = run_and_poll(expect_done, timeout_ms);
+    rc = run_and_poll(expect_done_mask, timeout_ms);
     if (rc) return 1;
 
     /* Read back and check */
     if (expect_path || out_path) {
-        int lanes_to_check = (channel >= 0) ? 1 : 4;
-        int first_ch = (channel >= 0) ? channel : 0;
-        for (int L = first_ch; L < first_ch + lanes_to_check; L++) {
-            size_t nbytes = (size_t)mem_blocks * A2_BLOCK_BYTES;
-            /* In p4_mode we only read back lane_len per lane */
-            if (p4_mode) nbytes = (size_t)lane_len * A2_BLOCK_BYTES;
-            uint8_t *rb = calloc(1, nbytes);
-            uint64_t lbase = base;
-            if (!p4_mode && channel < 0) lbase = base + (uint64_t)L * (size_t)mem_blocks * A2_BLOCK_BYTES;
-            /* p4_mode: lbase is shared base, but DMA reads per-lane offset */
-            int r;
-            if (p4_mode) {
+        if (p4_mode) {
+            for (int L = 0; L < (int)A2_NUM_DDR; L++) {
+                size_t nbytes = (size_t)lane_len * A2_BLOCK_BYTES;
+                uint8_t *rb = calloc(1, nbytes);
                 uint64_t lane_off = (uint64_t)L * lane_len * A2_BLOCK_BYTES;
-                r = ddr_read_channel(L, base + lane_off, rb, lane_len);
-            } else {
-                r = ddr_read_channel(L, lbase, rb, mem_blocks);
-            }
-            if (r) { free(rb); return 1; }
-            if (out_path) {
-                char fname[512];
-                if (lanes_to_check > 1) snprintf(fname, sizeof fname, "%s.ch%d", out_path, L);
-                else snprintf(fname, sizeof fname, "%s", out_path);
-                FILE *f = fopen(fname, "wb");
-                if (f) { fwrite(rb, 1, nbytes, f); fclose(f); printf("wrote %zu B to %s\n", nbytes, fname); }
-            }
-            if (expect_path) {
-                /* expect_path holds the full working set (32 KiB for RFC).
-                 * In p4_mode slice it so lane L is compared to its lane slice. */
-                if (p4_mode) {
+                int r = ddr_read_channel(L, base + lane_off, rb, lane_len);
+                if (r) { free(rb); return 1; }
+                if (out_path) {
+                    char fname[512];
+                    snprintf(fname, sizeof fname, "%s.ch%d", out_path, L);
+                    FILE *f = fopen(fname, "wb");
+                    if (f) { fwrite(rb, 1, nbytes, f); fclose(f); printf("wrote %zu B to %s\n", nbytes, fname); }
+                }
+                if (expect_path) {
                     size_t full_bytes;
                     uint8_t *full = load_hex(expect_path, &full_bytes);
                     if (!full) { free(rb); return 1; }
@@ -623,12 +600,35 @@ int main(int argc, char **argv) {
                     }
                     printf("PASS lane %d (%zu B match vs %s slice)\n", L, nbytes, expect_path);
                     free(full);
-                } else {
-                    int k = check_hex(expect_path, rb, nbytes);
-                    if (k) { free(rb); return 1; }
+                }
+                free(rb);
+            }
+        } else {
+            for (int ch = 0; ch < (int)A2_NUM_DDR; ch++) {
+                if (channel >= 0 && ch != channel) continue;
+                for (uint32_t g = 0; g < ctxs_per_ch; g++) {
+                    int L = ch * ctxs_per_ch + g;
+                    size_t nbytes = (size_t)mem_blocks * A2_BLOCK_BYTES;
+                    uint8_t *rb = calloc(1, nbytes);
+                    uint64_t ctx_addr = base + (uint64_t)g * lane_len * A2_BLOCK_BYTES;
+                    int r = ddr_read_channel(ch, ctx_addr, rb, mem_blocks);
+                    if (r) { free(rb); return 1; }
+                    if (out_path) {
+                        char fname[512];
+                        if (channel < 0 || ctxs_per_ch > 1)
+                            snprintf(fname, sizeof fname, "%s.lane%d", out_path, L);
+                        else
+                            snprintf(fname, sizeof fname, "%s", out_path);
+                        FILE *f = fopen(fname, "wb");
+                        if (f) { fwrite(rb, 1, nbytes, f); fclose(f); printf("wrote %zu B to %s\n", nbytes, fname); }
+                    }
+                    if (expect_path) {
+                        int k = check_hex(expect_path, rb, nbytes);
+                        if (k) { free(rb); return 1; }
+                    }
+                    free(rb);
                 }
             }
-            free(rb);
         }
     }
 

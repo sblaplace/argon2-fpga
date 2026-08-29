@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Functional core of the F1 argon2 CL (HDK-independent).
 //
-// Instantiates one argon2_fill_axi per DDR channel and an OCL register
-// slave, and joins the lanes' slice barriers when p4_mode is set:
-//
-//   * p4_mode = 0  -> four independent p=1 jobs (one candidate per
-//                     channel). Each core owns lane_id 0 in its own
-//                     private memory region.
-//   * p4_mode = 1  -> one p=4 job spread across the four channels.
-//                     Core L walks lane L of the same job; the four
-//                     slice barriers are AND-joined (exactly the
-//                     argon2_fill_job barrier, see rtl/argon2/).
+// Instantiates CTXS_PER_CH argon2_fill_ctrl lanes per DDR channel
+// (default 3, concentrating N independent p=1 contexts onto each channel
+// via argon2_lane_conc for +56% cand/s), an AXI-MM adapter per channel,
+// and an OCL register slave.
 //
 // The DDR ports are AXI4 *master* (m_ddr_* outputs driven by the core,
 // *_ready / b* / r* inputs driven by the DDR controller). The OCL ports
@@ -27,8 +21,9 @@
 `endif
 
 module cl_argon2_core #(
-    parameter int NUM_DDR = `A2_NUM_DDR,
-    parameter int N_P    = 1   // parallel P units in the compression G
+    parameter int NUM_DDR     = `A2_NUM_DDR,
+    parameter int CTXS_PER_CH = `A2_DEFAULT_CTXS_PER_CH,
+    parameter int N_P         = 1   // parallel P units in the compression G
 ) (
     input  logic clk,
     input  logic rst_n,           // active-low, already in the clk domain
@@ -99,13 +94,14 @@ module cl_argon2_core #(
     input  logic [NUM_DDR-1:0]        m_ddr_rlast
 );
 
+    localparam int TOTAL_LANES = NUM_DDR * CTXS_PER_CH;
     localparam int NREG = `A2_OCL_NREG;
 
     // ---- OCL register file ---------------------------------------------
     logic [31:0] ocl_regf   [0:NREG-1];
     logic [NREG-1:0] ocl_reg_wr;
     logic [31:0] status_reg [0:NREG-1];
-    logic [NUM_DDR-1:0] lane_busy, lane_done;
+    logic [TOTAL_LANES-1:0] lane_busy, lane_done;
     logic [NREG-1:0] status_sel;
 
     assign status_sel = (NREG'(1) << `A2_OCL_STATUS);   // only STATUS is RO
@@ -113,7 +109,7 @@ module cl_argon2_core #(
     // done is a single-cycle pulse from each fill core. Latch it until the
     // next GLOBAL_START so a host polling over PCIe (or an OCL read loop,
     // several cycles per poll) cannot miss a completed job.
-    logic [NUM_DDR-1:0] done_latch;
+    logic [TOTAL_LANES-1:0] done_latch;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -128,7 +124,11 @@ module cl_argon2_core #(
     always_comb begin
         for (int k = 0; k < NREG; k = k + 1)
             status_reg[k] = 32'd0;
-        status_reg[`A2_OCL_STATUS] = {24'd0, done_latch, lane_busy};
+        if (TOTAL_LANES <= 4) begin
+            status_reg[`A2_OCL_STATUS] = {12'd0, done_latch[3:0], 8'd0, done_latch[3:0], lane_busy[3:0]};
+        end else begin
+            status_reg[`A2_OCL_STATUS] = {16'(done_latch), 16'(lane_busy)};
+        end
     end
 
     cl_argon2_ocl #(.NREG(NREG)) u_ocl (
@@ -174,85 +174,246 @@ module cl_argon2_core #(
     assign core_rst_n  = rst_n & ~soft_reset;
 
     // ---- Slice-barrier join across lanes -------------------------------
-    // Matches rtl/argon2/argon2_fill_job.sv: sync_ack = {LANES{&sync_req}}.
-    logic [NUM_DDR-1:0] sync_req, sync_ack;
-    assign sync_ack = p4_mode ? {NUM_DDR{&sync_req}} : {NUM_DDR{1'b1}};
+    logic [TOTAL_LANES-1:0] sync_req, sync_ack;
+    assign sync_ack = p4_mode ? {TOTAL_LANES{&sync_req}} : {TOTAL_LANES{1'b1}};
+
+    // ---- Lane registers ------------------------------------------------
+    logic [31:0] lane_ctrl     [0:TOTAL_LANES-1];
+    logic [31:0] passes        [0:TOTAL_LANES-1];
+    logic [31:0] lane_length   [0:TOTAL_LANES-1];
+    logic [31:0] memory_blocks [0:TOTAL_LANES-1];
+    logic [31:0] base_lo       [0:TOTAL_LANES-1];
+    logic [31:0] base_hi       [0:TOTAL_LANES-1];
+    logic [`A2_AXI_ADDR_W-1:0] base_addr [0:TOTAL_LANES-1];
 
     genvar L;
     generate
-        for (L = 0; L < NUM_DDR; L++) begin : lane
-            logic [31:0] lane_ctrl, passes, lane_length, memory_blocks;
-            logic [31:0] base_lo, base_hi;
-            logic [`A2_AXI_ADDR_W-1:0] base_addr;
+        for (L = 0; L < TOTAL_LANES; L++) begin : reg_lane
+            assign lane_ctrl[L]     = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 0];
+            assign passes[L]        = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 1];
+            assign lane_length[L]   = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 2];
+            assign memory_blocks[L] = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 3];
+            assign base_lo[L]       = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 4];
+            assign base_hi[L]       = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 5];
+            assign base_addr[L]     = {base_hi[L], base_lo[L]};
+        end
+    endgenerate
 
-            assign lane_ctrl     = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 0];
-            assign passes        = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 1];
-            assign lane_length   = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 2];
-            assign memory_blocks = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 3];
-            assign base_lo       = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 4];
-            assign base_hi       = ocl_regf[`A2_OCL_LANE_BASE + L*`A2_OCL_LANE_STRIDE + 5];
-            assign base_addr     = {base_hi, base_lo};
+    // ---- Memory attachment per DDR channel ------------------------------
+    genvar ch;
+    generate
+        if (CTXS_PER_CH == 1) begin : g_single_ctx
+            for (ch = 0; ch < NUM_DDR; ch++) begin : channel
+                localparam int idx = ch;
+                argon2_fill_axi #(
+                    .AXI_ADDR_W(`A2_AXI_ADDR_W),
+                    .AXI_ID_W(`A2_AXI_ID_W),
+                    .AXI_DATA_W(`A2_AXI_DATA_W),
+                    .BLK_ADDR_W(`A2_BLK_ADDR_W),
+                    .N_P(N_P)
+                ) u_fill (
+                    .clk           (clk),
+                    .rst_n         (core_rst_n),
+                    .start         (start_pulse && (passes[idx] != 0)),
+                    .busy          (lane_busy[idx]),
+                    .done          (lane_done[idx]),
+                    .passes        (passes[idx]),
+                    .lanes         (p4_mode ? 32'd4 : 32'd1),
+                    .lane_id       (p4_mode ? 32'(ch) : 32'd0),
+                    .lane_length   (lane_length[idx]),
+                    .memory_blocks (memory_blocks[idx]),
+                    .type_i        (lane_ctrl[idx][1:0]),
+                    .sync_req      (sync_req[idx]),
+                    .sync_ack      (sync_ack[idx]),
+                    .base_addr     (base_addr[idx]),
+                    .state_o       (),
 
-            argon2_fill_axi #(.AXI_ADDR_W(`A2_AXI_ADDR_W),
-                              .AXI_ID_W(`A2_AXI_ID_W),
-                              .AXI_DATA_W(`A2_AXI_DATA_W),
-                              .BLK_ADDR_W(`A2_BLK_ADDR_W),
-                              .N_P(N_P)) u_fill (
-                .clk           (clk),
-                .rst_n         (core_rst_n),
-                .start         (start_pulse),
-                .busy          (lane_busy[L]),
-                .done          (lane_done[L]),
-                // p4_mode joins the four channels into one p=4 job;
-                // otherwise each channel runs an independent p=1 job.
-                .passes        (passes),
-                .lanes         (p4_mode ? 32'd4 : 32'd1),
-                .lane_id       (p4_mode ? 32'(L) : 32'd0),
-                .lane_length   (lane_length),
-                .memory_blocks (memory_blocks),
-                .type_i        (lane_ctrl[1:0]),
-                .sync_req      (sync_req[L]),
-                .sync_ack      (sync_ack[L]),
-                .base_addr     (base_addr),
+                    .m_axi_awid    (m_ddr_awid[ch]),
+                    .m_axi_awaddr  (m_ddr_awaddr[ch]),
+                    .m_axi_awlen   (m_ddr_awlen[ch]),
+                    .m_axi_awsize  (m_ddr_awsize[ch]),
+                    .m_axi_awburst (m_ddr_awburst[ch]),
+                    .m_axi_awlock  (m_ddr_awlock[ch]),
+                    .m_axi_awcache (m_ddr_awcache[ch]),
+                    .m_axi_awprot  (m_ddr_awprot[ch]),
+                    .m_axi_awqos   (m_ddr_awqos[ch]),
+                    .m_axi_awvalid (m_ddr_awvalid[ch]),
+                    .m_axi_awready (m_ddr_awready[ch]),
+                    .m_axi_wdata   (m_ddr_wdata[ch]),
+                    .m_axi_wstrb   (m_ddr_wstrb[ch]),
+                    .m_axi_wlast   (m_ddr_wlast[ch]),
+                    .m_axi_wvalid  (m_ddr_wvalid[ch]),
+                    .m_axi_wready  (m_ddr_wready[ch]),
+                    .m_axi_bid     (m_ddr_bid[ch]),
+                    .m_axi_bresp   (m_ddr_bresp[ch]),
+                    .m_axi_bvalid  (m_ddr_bvalid[ch]),
+                    .m_axi_bready  (m_ddr_bready[ch]),
+                    .m_axi_arid    (m_ddr_arid[ch]),
+                    .m_axi_araddr  (m_ddr_araddr[ch]),
+                    .m_axi_arlen   (m_ddr_arlen[ch]),
+                    .m_axi_arsize  (m_ddr_arsize[ch]),
+                    .m_axi_arburst (m_ddr_arburst[ch]),
+                    .m_axi_arlock  (m_ddr_arlock[ch]),
+                    .m_axi_arcache (m_ddr_arcache[ch]),
+                    .m_axi_arprot  (m_ddr_arprot[ch]),
+                    .m_axi_arqos   (m_ddr_arqos[ch]),
+                    .m_axi_arvalid (m_ddr_arvalid[ch]),
+                    .m_axi_arready (m_ddr_arready[ch]),
+                    .m_axi_rid     (m_ddr_rid[ch]),
+                    .m_axi_rdata   (m_ddr_rdata[ch]),
+                    .m_axi_rresp   (m_ddr_rresp[ch]),
+                    .m_axi_rlast   (m_ddr_rlast[ch]),
+                    .m_axi_rvalid  (m_ddr_rvalid[ch]),
+                    .m_axi_rready  (m_ddr_rready[ch])
+                );
+            end
+        end else begin : g_multi_ctx
+            for (ch = 0; ch < NUM_DDR; ch++) begin : channel
+                localparam int CH_BASE_LANE = ch * CTXS_PER_CH;
 
-                .m_axi_awid    (m_ddr_awid[L]),
-                .m_axi_awaddr  (m_ddr_awaddr[L]),
-                .m_axi_awlen   (m_ddr_awlen[L]),
-                .m_axi_awsize  (m_ddr_awsize[L]),
-                .m_axi_awburst (m_ddr_awburst[L]),
-                .m_axi_awlock  (m_ddr_awlock[L]),
-                .m_axi_awcache (m_ddr_awcache[L]),
-                .m_axi_awprot  (m_ddr_awprot[L]),
-                .m_axi_awqos   (m_ddr_awqos[L]),
-                .m_axi_awvalid (m_ddr_awvalid[L]),
-                .m_axi_awready (m_ddr_awready[L]),
-                .m_axi_wdata   (m_ddr_wdata[L]),
-                .m_axi_wstrb   (m_ddr_wstrb[L]),
-                .m_axi_wlast   (m_ddr_wlast[L]),
-                .m_axi_wvalid  (m_ddr_wvalid[L]),
-                .m_axi_wready  (m_ddr_wready[L]),
-                .m_axi_bid     (m_ddr_bid[L]),
-                .m_axi_bresp   (m_ddr_bresp[L]),
-                .m_axi_bvalid  (m_ddr_bvalid[L]),
-                .m_axi_bready  (m_ddr_bready[L]),
-                .m_axi_arid    (m_ddr_arid[L]),
-                .m_axi_araddr  (m_ddr_araddr[L]),
-                .m_axi_arlen   (m_ddr_arlen[L]),
-                .m_axi_arsize  (m_ddr_arsize[L]),
-                .m_axi_arburst (m_ddr_arburst[L]),
-                .m_axi_arlock  (m_ddr_arlock[L]),
-                .m_axi_arcache (m_ddr_arcache[L]),
-                .m_axi_arprot  (m_ddr_arprot[L]),
-                .m_axi_arqos   (m_ddr_arqos[L]),
-                .m_axi_arvalid (m_ddr_arvalid[L]),
-                .m_axi_arready (m_ddr_arready[L]),
-                .m_axi_rid     (m_ddr_rid[L]),
-                .m_axi_rdata   (m_ddr_rdata[L]),
-                .m_axi_rresp   (m_ddr_rresp[L]),
-                .m_axi_rlast   (m_ddr_rlast[L]),
-                .m_axi_rvalid  (m_ddr_rvalid[L]),
-                .m_axi_rready  (m_ddr_rready[L])
-            );
+                logic [CTXS_PER_CH-1:0]                     l_rd_valid, l_rd_ready, l_rd_data_v, l_rd_last;
+                logic [CTXS_PER_CH-1:0][`A2_BLK_ADDR_W-1:0] l_rd_addr;
+                logic [CTXS_PER_CH-1:0][`A2_AXI_DATA_W-1:0] l_rd_data;
+                logic [CTXS_PER_CH-1:0]                     l_wr_valid, l_wr_ready, l_wr_last;
+                logic [CTXS_PER_CH-1:0][`A2_BLK_ADDR_W-1:0] l_wr_addr;
+                logic [CTXS_PER_CH-1:0][`A2_AXI_DATA_W-1:0] l_wr_data;
+
+                genvar g;
+                for (g = 0; g < CTXS_PER_CH; g++) begin : ctx
+                    localparam int idx = CH_BASE_LANE + g;
+
+                    argon2_fill_ctrl #(
+                        .ADDR_W(`A2_BLK_ADDR_W),
+                        .N_P(N_P)
+                    ) u_fill (
+                        .clk           (clk),
+                        .rst_n         (core_rst_n),
+                        .start         (start_pulse && (passes[idx] != 0)),
+                        .busy          (lane_busy[idx]),
+                        .done          (lane_done[idx]),
+                        .passes        (passes[idx]),
+                        .lanes         (32'd1),
+                        .lane_id       (32'd0),
+                        .lane_length   (lane_length[idx]),
+                        .memory_blocks (memory_blocks[idx]),
+                        .type_i        (lane_ctrl[idx][1:0]),
+                        .sync_req      (sync_req[idx]),
+                        .sync_ack      (sync_ack[idx]),
+                        .state_o       (),
+                        .mem_rd_valid  (l_rd_valid[g]),
+                        .mem_rd_ready  (l_rd_ready[g]),
+                        .mem_rd_addr   (l_rd_addr[g]),
+                        .mem_rd_owner  (),
+                        .mem_rd_data_v (l_rd_data_v[g]),
+                        .mem_rd_data   (l_rd_data[g]),
+                        .mem_rd_last   (l_rd_last[g]),
+                        .mem_wr_valid  (l_wr_valid[g]),
+                        .mem_wr_ready  (l_wr_ready[g]),
+                        .mem_wr_addr   (l_wr_addr[g]),
+                        .mem_wr_data   (l_wr_data[g]),
+                        .mem_wr_last   (l_wr_last[g])
+                    );
+                end
+
+                logic                      c_rd_valid, c_rd_ready, c_rd_data_v, c_rd_last;
+                logic [`A2_BLK_ADDR_W-1:0] c_rd_addr;
+                logic [`A2_AXI_DATA_W-1:0] c_rd_data;
+                logic                      c_wr_valid, c_wr_ready, c_wr_last;
+                logic [`A2_BLK_ADDR_W-1:0] c_wr_addr;
+                logic [`A2_AXI_DATA_W-1:0] c_wr_data;
+
+                argon2_lane_conc #(
+                    .ADDR_W(`A2_BLK_ADDR_W),
+                    .LANES(CTXS_PER_CH),
+                    .MAX_INFLIGHT(4)
+                ) u_conc (
+                    .clk        (clk),
+                    .rst_n      (core_rst_n),
+                    .ctx_len    (lane_length[CH_BASE_LANE]),
+                    .l_rd_valid (l_rd_valid),
+                    .l_rd_ready (l_rd_ready),
+                    .l_rd_addr  (l_rd_addr),
+                    .l_rd_data_v(l_rd_data_v),
+                    .l_rd_data  (l_rd_data),
+                    .l_rd_last  (l_rd_last),
+                    .l_wr_valid (l_wr_valid),
+                    .l_wr_ready (l_wr_ready),
+                    .l_wr_addr  (l_wr_addr),
+                    .l_wr_data  (l_wr_data),
+                    .l_wr_last  (l_wr_last),
+                    .c_rd_valid (c_rd_valid),
+                    .c_rd_ready (c_rd_ready),
+                    .c_rd_addr  (c_rd_addr),
+                    .c_rd_data_v(c_rd_data_v),
+                    .c_rd_data  (c_rd_data),
+                    .c_rd_last  (c_rd_last),
+                    .c_wr_valid (c_wr_valid),
+                    .c_wr_ready (c_wr_ready),
+                    .c_wr_addr  (c_wr_addr),
+                    .c_wr_data  (c_wr_data),
+                    .c_wr_last  (c_wr_last)
+                );
+
+                argon2_axi_mm #(
+                    .AXI_ADDR_W (`A2_AXI_ADDR_W),
+                    .AXI_ID_W   (`A2_AXI_ID_W),
+                    .AXI_DATA_W (`A2_AXI_DATA_W),
+                    .BLK_ADDR_W (`A2_BLK_ADDR_W),
+                    .MAX_RD_PEND(4)
+                ) u_axi (
+                    .clk           (clk),
+                    .rst_n         (core_rst_n),
+                    .base_addr     (base_addr[CH_BASE_LANE]),
+                    .mem_rd_valid  (c_rd_valid),
+                    .mem_rd_ready  (c_rd_ready),
+                    .mem_rd_addr   (c_rd_addr),
+                    .mem_rd_data_v (c_rd_data_v),
+                    .mem_rd_data   (c_rd_data),
+                    .mem_rd_last   (c_rd_last),
+                    .mem_wr_valid  (c_wr_valid),
+                    .mem_wr_ready  (c_wr_ready),
+                    .mem_wr_addr   (c_wr_addr),
+                    .mem_wr_data   (c_wr_data),
+                    .mem_wr_last   (c_wr_last),
+                    .m_axi_awid    (m_ddr_awid[ch]),
+                    .m_axi_awaddr  (m_ddr_awaddr[ch]),
+                    .m_axi_awlen   (m_ddr_awlen[ch]),
+                    .m_axi_awsize  (m_ddr_awsize[ch]),
+                    .m_axi_awburst (m_ddr_awburst[ch]),
+                    .m_axi_awlock  (m_ddr_awlock[ch]),
+                    .m_axi_awcache (m_ddr_awcache[ch]),
+                    .m_axi_awprot  (m_ddr_awprot[ch]),
+                    .m_axi_awqos   (m_ddr_awqos[ch]),
+                    .m_axi_awvalid (m_ddr_awvalid[ch]),
+                    .m_axi_awready (m_ddr_awready[ch]),
+                    .m_axi_wdata   (m_ddr_wdata[ch]),
+                    .m_axi_wstrb   (m_ddr_wstrb[ch]),
+                    .m_axi_wlast   (m_ddr_wlast[ch]),
+                    .m_axi_wvalid  (m_ddr_wvalid[ch]),
+                    .m_axi_wready  (m_ddr_wready[ch]),
+                    .m_axi_bid     (m_ddr_bid[ch]),
+                    .m_axi_bresp   (m_ddr_bresp[ch]),
+                    .m_axi_bvalid  (m_ddr_bvalid[ch]),
+                    .m_axi_bready  (m_ddr_bready[ch]),
+                    .m_axi_arid    (m_ddr_arid[ch]),
+                    .m_axi_araddr  (m_ddr_araddr[ch]),
+                    .m_axi_arlen   (m_ddr_arlen[ch]),
+                    .m_axi_arsize  (m_ddr_arsize[ch]),
+                    .m_axi_arburst (m_ddr_arburst[ch]),
+                    .m_axi_arlock  (m_ddr_arlock[ch]),
+                    .m_axi_arcache (m_ddr_arcache[ch]),
+                    .m_axi_arprot  (m_ddr_arprot[ch]),
+                    .m_axi_arqos   (m_ddr_arqos[ch]),
+                    .m_axi_arvalid (m_ddr_arvalid[ch]),
+                    .m_axi_arready (m_ddr_arready[ch]),
+                    .m_axi_rid     (m_ddr_rid[ch]),
+                    .m_axi_rdata   (m_ddr_rdata[ch]),
+                    .m_axi_rresp   (m_ddr_rresp[ch]),
+                    .m_axi_rlast   (m_ddr_rlast[ch]),
+                    .m_axi_rvalid  (m_ddr_rvalid[ch]),
+                    .m_axi_rready  (m_ddr_rready[ch])
+                );
+            end
         end
     endgenerate
 

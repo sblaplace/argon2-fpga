@@ -24,6 +24,8 @@ Usage: $0 {lint|sim|emit-top|dcp|host|all} [options]
 Options:
   --np N              Parallel P units to use (1,2,4,8). Default: \
                       A2_N_P env var, else 1.
+  --ctxs-per-ch N     Contexts per DDR channel (1..4). Default: \
+                      A2_CTXS_PER_CH env var, else 3.
   --top-module NAME   Top-module name for emit-top/dcp. Default: \
                       A2_HDK_TOP env var, else cl_dram_dma.
   --out PATH          Output path for emit-top. Default: \
@@ -56,6 +58,7 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 NP="${A2_N_P:-1}"
+CTXS="${A2_CTXS_PER_CH:-3}"
 TOP_MODULE="${A2_HDK_TOP:-cl_dram_dma}"
 OUT_PATH="${A2_TOP_OUT:-}"
 
@@ -64,6 +67,11 @@ while [[ $# -gt 0 ]]; do
     --np)
       [[ $# -ge 2 ]] || { echo "--np requires a value" >&2; exit 2; }
       NP="$2"
+      shift 2
+      ;;
+    --ctxs-per-ch)
+      [[ $# -ge 2 ]] || { echo "--ctxs-per-ch requires a value" >&2; exit 2; }
+      CTXS="$2"
       shift 2
       ;;
     --top-module)
@@ -92,27 +100,30 @@ validate_np "$NP"
 
 emit_top() {
   local out="${OUT_PATH:-/tmp/${TOP_MODULE}_argon2_np${NP}.sv}"
-  python3 "$F1/emit_hdk_top.py" --np "$NP" --module-name "$TOP_MODULE" --out "$out"
+  python3 "$F1/emit_hdk_top.py" --np "$NP" --ctxs-per-ch "$CTXS" --module-name "$TOP_MODULE" --out "$out"
   echo "Generated top wrapper: $out"
   echo "  top module : $TOP_MODULE"
   echo "  default N_P: $NP"
+  echo "  ctxs/ch    : $CTXS"
 }
 
 lint() {
   local vltor
   vltor="$(find_verilator)"
-  echo "== lint: iverilog (if available), N_P=$NP =="
+  echo "== lint: iverilog (if available), N_P=$NP, CTXS=$CTXS =="
   if command -v iverilog >/dev/null 2>&1; then
-    iverilog -g2012 -Pcl_argon2.N_P="$NP" -I"$ROOT/rtl/include" -I"$F1/design" \
-      -o /tmp/cl_argon2.lint.out "$F1/design/cl_argon2.sv" -f "$F1/filelist.f" \
+    (cd "$F1" && iverilog -g2012 -Pcl_argon2.N_P="$NP" -Pcl_argon2.CTXS_PER_CH="$CTXS" \
+      -I"$ROOT/rtl/include" -I"$F1/design" \
+      -o /tmp/cl_argon2.lint.out "design/cl_argon2.sv" -f "filelist.f") \
       && echo "iverilog: OK"
   else
     echo "iverilog not on PATH — skipping (Python KAT still valid: make test)"
   fi
-  echo "== lint: verilator (if available), N_P=$NP =="
+  echo "== lint: verilator (if available), N_P=$NP, CTXS=$CTXS =="
   if [[ -n "$vltor" ]]; then
-    "$vltor" --lint-only -GN_P="$NP" -I"$ROOT/rtl/include" -I"$F1/design" \
-      -f "$F1/filelist.f" "$F1/design/cl_argon2.sv" && echo "verilator: OK ($vltor)"
+    (cd "$F1" && "$vltor" --lint-only -Wno-fatal -Wno-WIDTH --top-module cl_argon2 \
+      -GN_P="$NP" -GCTXS_PER_CH="$CTXS" -I"$ROOT/rtl/include" -I"$F1/design" \
+      -f "filelist.f" "design/cl_argon2.sv") && echo "verilator: OK ($vltor)"
   else
     echo "verilator not on PATH — skipping"
   fi

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Top-level bench for the F1 CL (cl_argon2).
 //
-// Four argon2_fill_axi cores sit behind the OCL register slave and four
-// AXI4 DDR ports. This bench wires each DDR port to a behavioral
-// tb_axi_ram, drives the OCL from a tiny BFM, and runs a known-answer
-// argon2i job (m=8 KiB, t=2, password/somesalt) on all four channels in
-// independent p=1 mode. Each channel's final working set is compared
-// against the RFC-golden vector (gen/fill_i_exp.hex).
+// CTXS_PER_CH fill cores sit behind argon2_lane_conc on each of the four
+// independent AXI4 DDR ports, controlled by the OCL register slave.
+// This bench wires each DDR port to a behavioral tb_axi_ram, drives the
+// OCL from a tiny BFM, and runs a known-answer argon2i job (m=8 KiB, t=2,
+// password/somesalt) across all 4 channels (12 contexts total by default).
+// Each context's final working set is compared against the RFC-golden
+// vector (gen/fill_i_exp.hex).
 //
 // Build/run:  make vectors && make cl        (iverilog)
 //             make vectors && make SIM=verilator cl
@@ -14,15 +15,19 @@
 `timescale 1ns / 1ps
 
 module tb_cl_argon2 #(
-    parameter int N_P = 1   // parallel P units in the compression G
+    parameter int N_P         = 1,   // parallel P units in the compression G
+    parameter int CTXS_PER_CH = 3    // contexts per DDR channel (default 3)
 );
-    localparam int NUM_DDR = 4;
-    localparam int NBLK   = 8;
-    localparam int NBEAT  = 16;
-    localparam int NW     = NBLK * NBEAT;   // words (beats) per channel
-    localparam int ADDR_W = 64;
-    localparam int ID_W   = 6;
-    localparam int DATA_W = 512;
+    localparam int NUM_DDR     = 4;
+    localparam int TOTAL_LANES = NUM_DDR * CTXS_PER_CH;
+    localparam int NBLK        = 8;
+    localparam int NBEAT       = 16;
+    localparam int NW_PER_CTX  = NBLK * NBEAT;   // words (beats) per context (128)
+    localparam int CH_NBLK     = CTXS_PER_CH * NBLK; // blocks per channel RAM
+    localparam int NW          = CTXS_PER_CH * NW_PER_CTX;   // words (beats) per channel RAM
+    localparam int ADDR_W      = 64;
+    localparam int ID_W        = 6;
+    localparam int DATA_W      = 512;
 
     // ---- clock / reset --------------------------------------------------
     logic        clk;
@@ -85,7 +90,7 @@ module tb_cl_argon2 #(
     logic [NUM_DDR-1:0][DATA_W/8-1:0] ddr_wstrb;
 
     // ---- DUT ------------------------------------------------------------
-    cl_argon2 #(.N_P(N_P)) dut (
+    cl_argon2 #(.N_P(N_P), .CTXS_PER_CH(CTXS_PER_CH)) dut (
         .clk_main_a0      (clk),
         .rst_main_n       (rst_main_n),
         .sh_cl_flr_assert (sh_cl_flr_assert),
@@ -135,7 +140,7 @@ module tb_cl_argon2 #(
 
     // ---- four behavioral DDR RAMs --------------------------------------
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
-                 .NBLK(NBLK), .RD_LAT(12)) ram0 (
+                 .NBLK(CH_NBLK), .RD_LAT(12)) ram0 (
         .clk(clk), .rst_n(rst_n),
         .s_axi_awid(ddr_awid[0]), .s_axi_awaddr(ddr_awaddr[0]), .s_axi_awlen(ddr_awlen[0]),
         .s_axi_awsize(ddr_awsize[0]), .s_axi_awvalid(ddr_awvalid[0]), .s_axi_awready(ddr_awready[0]),
@@ -148,7 +153,7 @@ module tb_cl_argon2 #(
         .s_axi_rlast(ddr_rlast[0]), .s_axi_rvalid(ddr_rvalid[0]), .s_axi_rready(ddr_rready[0])
     );
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
-                 .NBLK(NBLK), .RD_LAT(12)) ram1 (
+                 .NBLK(CH_NBLK), .RD_LAT(12)) ram1 (
         .clk(clk), .rst_n(rst_n),
         .s_axi_awid(ddr_awid[1]), .s_axi_awaddr(ddr_awaddr[1]), .s_axi_awlen(ddr_awlen[1]),
         .s_axi_awsize(ddr_awsize[1]), .s_axi_awvalid(ddr_awvalid[1]), .s_axi_awready(ddr_awready[1]),
@@ -161,7 +166,7 @@ module tb_cl_argon2 #(
         .s_axi_rlast(ddr_rlast[1]), .s_axi_rvalid(ddr_rvalid[1]), .s_axi_rready(ddr_rready[1])
     );
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
-                 .NBLK(NBLK), .RD_LAT(12)) ram2 (
+                 .NBLK(CH_NBLK), .RD_LAT(12)) ram2 (
         .clk(clk), .rst_n(rst_n),
         .s_axi_awid(ddr_awid[2]), .s_axi_awaddr(ddr_awaddr[2]), .s_axi_awlen(ddr_awlen[2]),
         .s_axi_awsize(ddr_awsize[2]), .s_axi_awvalid(ddr_awvalid[2]), .s_axi_awready(ddr_awready[2]),
@@ -174,7 +179,7 @@ module tb_cl_argon2 #(
         .s_axi_rlast(ddr_rlast[2]), .s_axi_rvalid(ddr_rvalid[2]), .s_axi_rready(ddr_rready[2])
     );
     tb_axi_ram #(.ADDR_W(ADDR_W), .DATA_W(DATA_W), .ID_W(ID_W),
-                 .NBLK(NBLK), .RD_LAT(12)) ram3 (
+                 .NBLK(CH_NBLK), .RD_LAT(12)) ram3 (
         .clk(clk), .rst_n(rst_n),
         .s_axi_awid(ddr_awid[3]), .s_axi_awaddr(ddr_awaddr[3]), .s_axi_awlen(ddr_awlen[3]),
         .s_axi_awsize(ddr_awsize[3]), .s_axi_awvalid(ddr_awvalid[3]), .s_axi_awready(ddr_awready[3]),
@@ -188,11 +193,6 @@ module tb_cl_argon2 #(
     );
 
     // ---- OCL BFM --------------------------------------------------------
-    // Drives and samples on the NEGEDGE: changing stimulus in the same
-    // active region as the DUT's posedge sampling is a simulator-order
-    // race (Verilator happened to win it; some vvp builds deadlocked on
-    // the aw/w handshake). Half a cycle away from both edges the
-    // handshakes are unambiguous in every simulator.
     task automatic ocl_write(input [31:0] addr, input [31:0] data);
         fork
             begin
@@ -220,14 +220,13 @@ module tb_cl_argon2 #(
     endtask
 
     // ---- test -----------------------------------------------------------
-    logic [511:0] exp [0:NW-1];
+    logic [511:0] init_vec [0:NW_PER_CTX-1];
+    logic [511:0] exp_vec  [0:NW_PER_CTX-1];
     integer errors;
     integer to;
     logic [31:0] st;
-    logic [3:0]  done;
+    logic [TOTAL_LANES-1:0] done;
 
-    // Icarus doesn't support unpacked-array task ports, so select the
-    // RAM by channel number and read words through this helper.
     function automatic logic [511:0] ram_word(input integer ch, input integer idx);
         case (ch)
             0: ram_word = ram0.mem[idx];
@@ -238,16 +237,16 @@ module tb_cl_argon2 #(
         endcase
     endfunction
 
-    task automatic check_ram(input integer ch, input string name);
+    task automatic check_ram_ctx(input integer ch, input integer g, input string name);
         int m;
         logic [511:0] got;
         m = 0;
-        for (int i = 0; i < NW; i = i + 1) begin
-            got = ram_word(ch, i);
-            if (got !== exp[i]) begin
+        for (int i = 0; i < NW_PER_CTX; i = i + 1) begin
+            got = ram_word(ch, g * NW_PER_CTX + i);
+            if (got !== exp_vec[i]) begin
                 if (m < 4)
                     $display("FAIL %s beat %0d got %0128h exp %0128h",
-                             name, i, got, exp[i]);
+                             name, i, got, exp_vec[i]);
                 m = m + 1;
             end
         end
@@ -273,16 +272,26 @@ module tb_cl_argon2 #(
         rst_main_n = 16'hFFFF;
         @(posedge clk);
 
-        $readmemh("gen/fill_i_init.hex", ram0.mem);
-        $readmemh("gen/fill_i_init.hex", ram1.mem);
-        $readmemh("gen/fill_i_init.hex", ram2.mem);
-        $readmemh("gen/fill_i_init.hex", ram3.mem);
-        $readmemh("gen/fill_i_exp.hex",  exp);
+        $readmemh("gen/fill_i_init.hex", init_vec);
+        $readmemh("gen/fill_i_exp.hex",  exp_vec);
 
-        // Program all four lanes for an independent p=1 argon2i job.
-        // p4_mode = 0 (CONTROL left at 0). Byte addresses use the
-        // (16 + L*8 + off)*4 mapping from fpga/f1/README.md.
-        for (int L = 0; L < NUM_DDR; L = L + 1) begin
+        // Preload memory for each context on each channel
+        for (int ch = 0; ch < NUM_DDR; ch = ch + 1) begin
+            for (int g = 0; g < CTXS_PER_CH; g = g + 1) begin
+                for (int b = 0; b < NW_PER_CTX; b = b + 1) begin
+                    case (ch)
+                        0: ram0.mem[g * NW_PER_CTX + b] = init_vec[b];
+                        1: ram1.mem[g * NW_PER_CTX + b] = init_vec[b];
+                        2: ram2.mem[g * NW_PER_CTX + b] = init_vec[b];
+                        3: ram3.mem[g * NW_PER_CTX + b] = init_vec[b];
+                    endcase
+                end
+            end
+        end
+
+        // Program all lanes for independent p=1 argon2i jobs.
+        // Byte addresses use the (16 + L*8 + off)*4 mapping from fpga/f1/README.md.
+        for (int L = 0; L < TOTAL_LANES; L = L + 1) begin
             logic [31:0] base;
             base = 32'h40 + (32'(L) * 32'h20);
             ocl_write(base + 32'h00, 32'h0001); // LANE_CTRL: type_i=1, lanes=1
@@ -297,53 +306,28 @@ module tb_cl_argon2 #(
         ocl_write(32'h00, 32'd1);
         $display("[dbg] GLOBAL_START written");
 
-        // Poll STATUS until all four report done. Any real run finishes in
-        // a few thousand polls; the cap just keeps a broken run fast.
-        done = 4'b0; to = 0;
-        while (done != 4'b1111 && to < 20000) begin
+        // Poll STATUS until all lanes report done.
+        done = '0; to = 0;
+        while (done != {TOTAL_LANES{1'b1}} && to < 20000) begin
             ocl_read(32'h08, st);
-            done = st[7:4];
+            done = (TOTAL_LANES <= 4) ? st[7:4] : st[16 +: TOTAL_LANES];
             to = to + 1;
         end
 
-        if (done != 4'b1111) begin
-            $display("FAIL timeout (STATUS=0x%08h, polls=%0d)", st, to);
-            // Postmortem: read the lane config back through the OCL and
-            // peek at each lane's fill FSM state directly.
-`ifndef VERILATOR
-            // Icarus (like most tools) requires constant scope indices in
-            // hierarchical references, so unroll the four lanes.
-            for (int L = 0; L < NUM_DDR; L = L + 1) begin
-                logic [31:0] base;
-                logic [31:0] lc, ps, ll, mb;
-                logic [4:0]  fst;
-                base = 32'h40 + (32'(L) * 32'h20);
-                ocl_read(base + 32'h00, lc);
-                ocl_read(base + 32'h04, ps);
-                ocl_read(base + 32'h08, ll);
-                ocl_read(base + 32'h0C, mb);
-                case (L)
-                    0: fst = dut.u_core.lane[0].u_fill.state_o;
-                    1: fst = dut.u_core.lane[1].u_fill.state_o;
-                    2: fst = dut.u_core.lane[2].u_fill.state_o;
-                    3: fst = dut.u_core.lane[3].u_fill.state_o;
-                    default: fst = 5'd31;
-                endcase
-                $display("[dbg] lane%0d LANE_CTRL=%08h PASSES=%08h LEN=%08h BLKS=%08h state=%0d busy=%b done=%b",
-                         L, lc, ps, ll, mb, fst,
-                         dut.u_core.lane_busy[L],
-                         dut.u_core.lane_done[L]);
-            end
-`endif
+        if (done != {TOTAL_LANES{1'b1}}) begin
+            $display("FAIL timeout (STATUS=0x%08h, polls=%0d, done=0x%0h)", st, to, done);
             errors = errors + 1;
         end else begin
-            $display("all four lanes done in %0d OCL polls", to);
+            $display("all %0d lanes done in %0d OCL polls", TOTAL_LANES, to);
         end
 
-        check_ram(0, "lane0");
-        check_ram(1, "lane1");
-        check_ram(2, "lane2");
-        check_ram(3, "lane3");
+        for (int L = 0; L < TOTAL_LANES; L = L + 1) begin
+            int ch;
+            int g;
+            ch = L / CTXS_PER_CH;
+            g  = L % CTXS_PER_CH;
+            check_ram_ctx(ch, g, $sformatf("lane%0d", L));
+        end
 
         if (errors == 0)
             $display("tb_cl_argon2: PASS");
