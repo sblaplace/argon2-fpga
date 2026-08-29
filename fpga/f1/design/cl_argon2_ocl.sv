@@ -13,7 +13,7 @@
 
 `timescale 1ns / 1ps
 
-module cl_argon2_ocl #(parameter int NREG = 64, parameter int ADDRW = 12) (
+module cl_argon2_ocl #(parameter int NREG = 128, parameter int ADDRW = 12) (
     input  logic        clk,
     input  logic        rst_n,
 

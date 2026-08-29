@@ -89,8 +89,10 @@ cannot be reused for G. Details: [docs/SURVEY.md](docs/SURVEY.md),
       hazards in `argon2_fill_ctrl` (see `docs/PERFORMANCE.md`).
 - [x] AXI4-MM adapter (`argon2_axi_mm` / `argon2_fill_axi`): 512-bit,
       16-beat bursts, independent R/W so a prefetch can overlap a write.
-- [x] F1 CL shell scaffold (`fpga/f1/`): `cl_argon2` top mapping the
-      `cl_dram_dma` port list onto 4× `argon2_fill_axi` + an OCL register
+- [x] F1 CL shell (`fpga/f1/`): `cl_argon2` top mapping the
+      `cl_dram_dma` port list onto 4 DDR channels with multi-context
+      concentration (`argon2_lane_conc`, default 3 ctxs/ch, 12 simultaneous
+      contexts total, +56% cand/s, ~6.53 cand/s at 200 MHz) + an OCL register
       slave + a p=4 slice-sync barrier. See `fpga/f1/README.md`.
 - [x] Performance model: the core was **measured** against a cycle-accurate
       DDR4-2400 timing model (`sim/tb_ddr4_ram.sv`, `make -C sim perf`) —
